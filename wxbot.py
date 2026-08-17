@@ -1292,39 +1292,59 @@ def main():
     state = State(cfg["state_file"])
     hwnd = wx.find_wechat()
     try:
-        wx.park_wechat(hwnd)  # 停靠右下角，不占主工作区
+        wx.park_wechat(hwnd)  # 启动即停靠：有虚拟屏进虚拟屏，否则主屏右下角
     except Exception:
         pass
     print(f"wxbot started. hwnd={hwnd} interval={cfg['poll_interval_seconds']}s")
-    # one-shot mode: python wxbot.py --once
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         try:
             replied, _n = poll_once(cfg, state, hwnd)
             print(f"[once] replied {len(replied)} conversation(s)")
         finally:
             state.save()
+            _give_back_wechat(hwnd)
         return
     uia_fail_streak = 0
-    while True:
-        try:
-            hwnd = wx.find_wechat()  # 每轮重取（窗口可能被关闭/重开）
-            replied, n_sessions = poll_once(cfg, state, hwnd)
-            if replied:
-                print(f"replied {len(replied)} conversation(s)")
-            uia_fail_streak = 0
-        except Exception as e:
-            print("poll error:", e)
-            n_sessions = -1
-            uia_fail_streak += 1
-            if uia_fail_streak % 6 == 1:
-                print("[wxbot] WeChat window/db unavailable, waiting...")
-        # 看门狗：微信会被自己的位置记忆/托盘复活弹回主屏，
-        # 每轮检查，跳回去了就停回虚拟显示器（已停靠时秒退，无开销）
-        try:
-            wx.ensure_window_in_screen(hwnd)
-        except Exception:
-            pass
-        time.sleep(cfg["poll_interval_seconds"])
+    try:
+        import signal
+        signal.signal(signal.SIGTERM,
+                      lambda s, f: (_ for _ in ()).throw(KeyboardInterrupt()))
+    except Exception:
+        pass
+    try:
+        while True:
+            try:
+                hwnd = wx.find_wechat()  # 每轮重取（窗口可能被关闭/重开）
+                replied, n_sessions = poll_once(cfg, state, hwnd)
+                if replied:
+                    print(f"replied {len(replied)} conversation(s)")
+                uia_fail_streak = 0
+            except Exception as e:
+                print("poll error:", e)
+                n_sessions = -1
+                uia_fail_streak += 1
+                if uia_fail_streak % 6 == 1:
+                    print("[wxbot] WeChat window/db unavailable, waiting...")
+            # 看门狗：微信会被自己的位置记忆/托盘复活弹回主屏，
+            # 每轮检查，跳回去了就停回虚拟显示器（已停靠时秒退，无开销）
+            try:
+                wx.ensure_window_in_screen(hwnd)
+            except Exception:
+                pass
+            time.sleep(cfg["poll_interval_seconds"])
+    except KeyboardInterrupt:
+        print("\n[wxbot] Ctrl+C, shutting down...")
+    finally:
+        state.save()
+        _give_back_wechat(hwnd)
+
+
+def _give_back_wechat(hwnd):
+    """退出时把微信还回主屏（正常使用）；失败不影响退出。"""
+    try:
+        wx.restore_wechat_to_primary(wx.find_wechat())
+    except Exception as e:
+        print("restore wechat to primary failed:", e)
 
 if __name__ == "__main__":
     main()

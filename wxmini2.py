@@ -641,29 +641,13 @@ def wait_user_idle(before_s: float = _IDLE_BEFORE_SEND_S,
     return False
 
 
-def park_wechat(hwnd: int):
-    """停靠微信窗口：有副屏/虚拟显示器 → 停到副屏（物理屏幕完全不可见，
-    ImageGrab 仍能截取）；否则退回主屏右下角小窗。
-    跨屏会触发 WM_DPICHANGED（应用自缩放，如 125%→100% 即 ×0.8），尺寸会跳；
-    用收敛循环处理：移动→实测→按比例修正请求→钳制到目标屏矩形内。"""
-    sec = secondary_screen_rect()
-    if sec:
-        sx, sy, sw, sh = sec
-        req_w = min(_PARK_W, sw - 8)
-        req_h = min(PARK_H, sh - 8)
-        # 秒退：微信会被自己的位置记忆/托盘复活弹回主屏，但每次都重新收敛
-        # 会反复触发 DPI 缩放折腾窗口——已经停好就不再动
-        l, t, r, b, cw, ch = get_window_rect(hwnd)
-        if (l >= sx - 8 and t >= sy - 8 and r <= sx + sw + 8 and b <= sy + sh + 8
-                and abs(cw - req_w) < 60):
-            return
-    else:
-        pw, ph = get_screen_size()
-        sx, sy, sw, sh = 0, 0, pw, ph
-        req_w = min(_PARK_W, sw - 80)
-        req_h = min(PARK_H, sh - 120)
-
-    # 第一步：收敛尺寸（跨屏 WM_DPICHANGED 会让应用自缩放；按实测比例修正请求）
+def _move_window_to(hwnd: int, sx: int, sy: int, sw: int, sh: int,
+                    req_w: int, req_h: int, center: bool):
+    """把窗口移动+调整到目标屏 (sx,sy,sw,sh) 内，请求尺寸 req_w×req_h。
+    跨屏 WM_DPICHANGED 会让应用自缩放（如 100%→125% 放大 1.25 倍），
+    两步法：先收敛尺寸（按实测比例修正请求），再纯移位置（尺寸不动不触发重缩放），
+    最后复核整窗必须在目标屏内（出屏部分 ImageGrab 截出来是黑的）。"""
+    # 第一步：收敛尺寸
     for _ in range(4):
         l, t, r, b, cw, ch = get_window_rect(hwnd)
         C.windll.user32.MoveWindow(hwnd, l, t, req_w, req_h, True)
@@ -675,16 +659,16 @@ def park_wechat(hwnd: int):
             rx = req_w / cw
             req_w = min(int(req_w * rx), sw - 8)
             req_h = min(int(req_h * rx), sh - 8)
-    # 第二步：纯位置移动（尺寸不变 → 不触发 DPI 重缩放，位置才能站住）
+    # 第二步：纯位置移动
     l, t, r, b, cw, ch = get_window_rect(hwnd)
-    if sec:
+    if center:
         want_l = sx + max(0, (sw - cw) // 2)
     else:
         want_l = sx + sw - cw - 16
     want_t = min(sy + max(0, (sh - ch) // 2), sy + sh - ch)
     C.windll.user32.MoveWindow(hwnd, want_l, want_t, cw, ch, True)
     time.sleep(0.4)
-    # 复核：整窗必须在目标屏内（掉出屏外的部分 ImageGrab 截出来是黑的）
+    # 复核
     l, t, r, b, cw, ch = get_window_rect(hwnd)
     if not (l >= sx - 8 and t >= sy - 8 and r <= sx + sw + 8 and b <= sy + sh + 8):
         C.windll.user32.MoveWindow(hwnd,
@@ -692,6 +676,41 @@ def park_wechat(hwnd: int):
                                    max(sy, min(sy + sh - ch, t)),
                                    cw, ch, True)
         time.sleep(0.3)
+
+
+def park_wechat(hwnd: int):
+    """停靠微信窗口：有副屏/虚拟显示器 → 停到副屏（物理屏幕完全不可见，
+    ImageGrab 仍能截取）；否则退回主屏右下角小窗。"""
+    sec = secondary_screen_rect()
+    if sec:
+        sx, sy, sw, sh = sec
+        req_w = min(_PARK_W, sw - 8)
+        req_h = min(PARK_H, sh - 8)
+        # 秒退：微信会被自己的位置记忆/托盘复活弹回主屏，但每次都重新收敛
+        # 会反复触发 DPI 缩放折腾窗口——已经停好就不再动
+        l, t, r, b, cw, ch = get_window_rect(hwnd)
+        if (l >= sx - 8 and t >= sy - 8 and r <= sx + sw + 8 and b <= sy + sh + 8
+                and abs(cw - req_w) < 60):
+            return
+        _move_window_to(hwnd, sx, sy, sw, sh, req_w, req_h, center=True)
+    else:
+        pw, ph = get_screen_size()
+        req_w = min(_PARK_W, pw - 80)
+        req_h = min(PARK_H, ph - 120)
+        _move_window_to(hwnd, 0, 0, pw, ph, req_w, req_h, center=False)
+
+
+_RESTORE_W, _RESTORE_H = 1300, 1400
+
+
+def restore_wechat_to_primary(hwnd: int):
+    """bot 退出时把微信还回主屏：大窗居中，恢复正常使用。
+    （bot 运行期间微信在虚拟屏营业，退出后归还桌面。）"""
+    pw, ph = get_screen_size()
+    req_w = min(_RESTORE_W, pw - 80)
+    req_h = min(_RESTORE_H, ph - 80)
+    _move_window_to(hwnd, 0, 0, pw, ph, req_w, req_h, center=True)
+    print(f"[wxmini2] WeChat restored to primary screen")
 
 def _grab_window(hwnd: int):
     """ImageGrab 截窗口屏幕区域。PrintWindow 对输入框等独立渲染层是盲区，
