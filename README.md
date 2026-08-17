@@ -2,8 +2,12 @@
 
 微信 PC 版自动读消息 + 自动回复机器人。
 
-纯 **UI 自动化**驱动（UIA 界面级操作，不注入 DLL、不改协议、不碰任何官方/逆向 API），
-配合 OpenAI 兼容的 LLM 接口生成回复，支持人格扮演、对话记忆、识图读文件、以及一个苹果风的 Web 管理控制台。
+**当前架构（2026-08 重构后）：读消息走微信本地解密数据库（SQLCipher，权威精确），
+发消息走视觉自动化（ImageGrab + RapidOCR + 坐标点击），LLM 双通道（StepFun 主 + MiniMax 备）。**
+主力人设：阿廖沙（中华田园长毛奶牛猫，傲娇）。
+
+> ⚠️ 架构细节、微信 4.x 踩坑实录与运行手册见 **[docs/PROJECT.md](docs/PROJECT.md)**（权威文档）。
+> 本文以下部分为历史版本说明，如与 PROJECT.md 冲突，以 PROJECT.md 为准。
 
 > 面向微信 PC 4.x，Windows 平台，Python 3.11+。
 
@@ -35,8 +39,8 @@
 ## 架构
 
 ```
-wxbot.py        主守护进程：轮询 / 回复策略 / 人格注入 / 能力分发 / 退避重试
-wxmini2.py      UIA 自动化库（手写，基于 wxauto4.uia）：会话列表 / 读气泡 / 发消息 / @ / 图 / 表情 / 贴纸 / 引用 / 文件
+wxbot.py        主守护进程：DB 驱动轮询 / 回复策略 / 人格注入 / 能力分发 / 退避重试 / 日志 Tee
+wxmini2.py      视觉自动化库：ImageGrab+RapidOCR / 侧边栏定位点击 / 发送验证链 / 渲染三级自愈 / 微信重启
 wxmini.py       旧版 UIA 库（保留兼容）
 wxbot_files.py  文件消息读取：定位微信文件存储 + 按类型解析（docx/pdf/xlsx/xls/md/txt）
 wxbot_memory.py 记忆系统：workspace 骨架 + system 注入 + LLM 事实提取

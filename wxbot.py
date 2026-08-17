@@ -13,7 +13,7 @@ Config: wxbot_config.json next to this file.
 """
 import copy, json, os, sys, time, random, re, hashlib
 import unicodedata
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import wxmini2 as wx
@@ -707,9 +707,9 @@ def _freq_hint(label, v):
 
 
 def _api_key(cfg):
-    """从环境变量 → openclaw.json env 取 API key。"""
+    """API key 优先级：环境变量 → llm.api_key（内联）→ 顶层 api_key → openclaw.json env。"""
     key_env = cfg["llm"].get("api_key_env", "DEEPSEEK_API_KEY")
-    api_key = os.environ.get(key_env) or cfg.get("api_key")
+    api_key = os.environ.get(key_env) or cfg["llm"].get("api_key") or cfg.get("api_key")
     if api_key:
         return api_key
     for oc in (os.path.expanduser("~/.openclaw/openclaw.json"), "F:/OpenClaw/.openclaw/openclaw.json"):
@@ -756,7 +756,7 @@ def _llm_call(cfg, system, user_content):
         attempts.append({
             "base_url": fb["base_url"],
             "model": fb["model"],
-            "_key": _load_api_key(fb.get("api_key_env", "")),
+            "_key": fb.get("api_key") or _load_api_key(fb.get("api_key_env", "")),
         })
     for i, a in enumerate(attempts):
         if not a["_key"]:
@@ -771,6 +771,10 @@ def _llm_call(cfg, system, user_content):
             "temperature": lcfg.get("temperature", 0.9),
             "max_tokens": lcfg.get("max_tokens", 400),
         }
+        # 可选 thinking 控制（默认关闭，例如 minimax-m3 必须传 {"type":"disabled"}）
+        _thinking = lcfg.get("thinking")
+        if _thinking is not None:
+            payload["thinking"] = _thinking
         try:
             data = _http_post_json(url, payload, a["_key"], timeout=60)
             reply = data["choices"][0]["message"].get("content", "").strip()
@@ -890,22 +894,24 @@ def _log_uia_error(e):
 
 
 def poll_once(cfg, state, hwnd):
-    """One poll cycle. Returns (replied, n_sessions)；n_sessions=-1 表示 list_sessions 异常。"""
+    """One poll cycle (DB-driven). Returns (replied, n_sessions)；n_sessions=-1 表示会话列表读取异常。
+    会话列表/消息内容/判边全部来自解密数据库（权威、无截断）；
+    OCR 视觉只在真正要回复时用于搜索定位会话并发送。"""
     replied = []
     try:
-        sessions = wx.list_sessions(hwnd)
-        _UIA_ERR["msg"] = None
-        _UIA_ERR["count"] = 0
+        sessions = wx.db_sessions(limit=30)
     except Exception as e:
-        _log_uia_error(e)
+        print("db_sessions error:", e)
         return replied, -1
 
+    now = time.time()
     for s in sessions:
         name = s["name"]
+        username = s.get("username") or ""
         last = s["last"]
-        if not name:
+        if not name or not username:
             continue
-        # 折叠的聊天/微信团队等是微信内置入口，不是真实会话，绝不能点开
+        # 微信内置入口不是真实会话，绝不能碰
         if name == "折叠的聊天" or name.startswith("折叠"):
             state.mark_seen(name, last or "")
             continue
@@ -913,32 +919,48 @@ def poll_once(cfg, state, hwnd):
             continue
         if cfg["reply"]["allow_contacts"] and name not in cfg["reply"]["allow_contacts"]:
             continue
-        # 分类型黑白名单：deny 优先；allow 非空 = 只回白名单
-        _is_grp = is_group_conversation(name, sessions)
-        _typed = cfg["reply"]["group"] if _is_grp else cfg["reply"]["private"]
+        is_group = username.endswith("@chatroom")  # 权威判群，替代名称启发式
+        _typed = cfg["reply"]["group"] if is_group else cfg["reply"]["private"]
         if name in (_typed.get("deny", []) or []):
             continue
         _allow = _typed.get("allow", []) or []
         if _allow and name not in _allow:
             continue
-        if not last:
+
+        # 上下文条数：只按这个会话配置取
+        ctx_cfg = cfg["reply"].get("context_messages", 8)
+        if isinstance(ctx_cfg, dict):
+            ctx_n = int(ctx_cfg.get(name, ctx_cfg.get("default", 8)))
+        else:
+            ctx_n = int(ctx_cfg)
+        ctx_n = max(1, min(1000, ctx_n))
+
+        # 直接读数据库（不点窗口；判边权威）。summary 列常为空串，
+        # 变化检测改用「最新消息 ts+内容」指纹。
+        try:
+            msgs = wx.read_chat_db(username, limit=max(ctx_n, 5))
+        except Exception as e:
+            print(f"read {name} error:", e)
             continue
+        if not msgs:
+            continue  # 本地没有该会话消息表（如没聊天记录的联系人）
+        newest = msgs[-1]
+        last_fp = f"{newest.get('ts')}|{newest.get('side')}|{newest.get('text', '')[:60]}"
         # skip if we already handled this exact last message
-        if state.is_seen(name, last):
+        if state.is_seen(name, last_fp):
             continue
         # skip if it's our own recent send (avoid echo loop)
-        if state.recently_sent(name, last):
-            state.mark_seen(name, last)
+        if state.recently_sent(name, newest.get("text", "")):
+            state.mark_seen(name, last_fp)
             state.save()
             continue
 
-        print(f"[poll] {name} changed: {last[:40]}")
+        print(f"[poll] {name} changed: {last_fp[:60]}")
 
-        is_group = is_group_conversation(name, sessions)
         unlimited = name in cfg["reply"].get("unlimited_groups", [])
         policy = cfg["reply"]["group"] if is_group else cfg["reply"]["private"]
         if not policy.get("enabled", True):
-            state.mark_seen(name, last)
+            state.mark_seen(name, last_fp)
             state.save()
             continue
 
@@ -956,13 +978,12 @@ def poll_once(cfg, state, hwnd):
                 print(f"[poll] {name} quiet hours, skip private reply")
                 continue
 
-        # 群聊：无限制群跳过 @ 检查；其余群看会话列表「[有人@我]」标记（折叠的群天然排除）
+        # 群聊：无限制群跳过 @ 检查；其余群看会话预览「[有人@我]」标记
         if is_group and policy.get("require_mention", False) and not unlimited:
-            raw = s.get("raw", "") or ""
-            has_badge = ("[有人@我]" in raw) or ("[有人@我]" in last)
+            has_badge = "[有人@我]" in (last or "")
             print(f"[poll] {name} group badge={has_badge}")
             if not has_badge:
-                state.mark_seen(name, last)
+                state.mark_seen(name, last_fp)
                 state.save()
                 continue
 
@@ -981,78 +1002,32 @@ def poll_once(cfg, state, hwnd):
                 _LLM_BACKOFF["logged"] = True
             continue
 
-        # 上下文条数先算好：只追溯这个要回复的窗口需要的条数，不做全量遍历
-        ctx_cfg = cfg["reply"].get("context_messages", 8)
-        if isinstance(ctx_cfg, dict):
-            ctx_n = int(ctx_cfg.get(name, ctx_cfg.get("default", 8)))
-        else:
-            ctx_n = int(ctx_cfg)
-        ctx_n = max(1, min(1000, ctx_n))  # 上限 1000 条
-
-        # open the conversation and read fresh bubbles (with side detection)
-        try:
-            ok = wx.open_chat_by_click(hwnd, name)
-            if not ok:
-                continue
-            time.sleep(0.8)
-            msgs = wx.read_chat(hwnd, limit=max(ctx_n, 5), detect_side=True)
-        except Exception as e:
-            print(f"open/read {name} error:", e)
-            continue
-
-        # find the last bubble sent by the OTHER side (text 或图片或文件)
+        # find the last message sent by the OTHER side (text/image/file)
         other_bubbles = [m for m in msgs if m["side"] == "other" and m["kind"] in ("text", "image", "file")]
         if not other_bubbles:
-            # 判边全灭时的兜底：用会话预览（群「昵称: 内容」/私聊直接是内容）匹配气泡定位对方消息
-            prev = re.sub(r"^\[(\d+条|有人@我)\]\s*", "", last or "").strip()
-            pm = re.match(r"^[^\s:：\[\]]{1,30}[:：](.*)$", prev)
-            if is_group and pm:
-                prev = pm.group(1).strip()
-            if prev and not state.recently_sent(name, prev, window_s=86400 * 365):
-                def _squash(s):
-                    return re.sub(r"[\u2005\u2006\s]", "", s or "")
-                sq = _squash(prev)
-                # 多级匹配：全文 → 尾部 12 字 → 尾部 6 字（兼容预览与气泡里 @ 标签渲染差异）
-                cands = [c for c in (sq, sq[-12:], sq[-6:]) if len(c) >= 2]
-                for cand in cands:
-                    hit = None
-                    for m in reversed(msgs):
-                        if m["kind"] in ("text", "image", "file") and cand in _squash(m["text"]):
-                            hit = m
-                            break
-                    if hit:
-                        hit["side"] = "other"
-                        other_bubbles = [hit]
-                        print(f"[poll] {name} side-detect fallback via preview")
-                        break
-        if not other_bubbles:
             print(f"[poll] {name} skip: no other-side msg")
-            if msgs and all(m.get("side") == "own" for m in msgs):
-                state.mark_seen(name, last or "")
+            # 最新一条是自己发的（回声）→ 标记已处理；否则下次再读一次
+            if msgs and msgs[-1].get("side") == "own":
+                state.mark_seen(name, last_fp)
                 state.save()
             continue
         last_bubble = other_bubbles[-1]
+        # 陈旧消息保护：刚启动/换状态文件时不对旧消息开火（10 分钟内才算新消息）
+        if now - float(last_bubble.get("ts") or 0) > 600:
+            print(f"[poll] {name} skip: last other-side msg too old "
+                  f"({int(now - float(last_bubble.get('ts') or 0))}s ago)")
+            state.mark_seen(name, last_fp)
+            state.save()
+            continue
         if last_bubble["kind"] == "image":
-            # 对方发来图片：截图气泡 → MiMo 识图 → 描述作为回复对象
+            # 对方发来图片：DB 拿不到气泡截图，先按占位描述走文本通道
             target_text = "[对方发来一张图片]"
-            try:
-                shot = grab_bubble_image(last_bubble["rect"], os.path.join(BASE, "tmp", "vision"))
-                if shot:
-                    try:
-                        desc = vision_describe(cfg, shot)
-                    finally:
-                        try:
-                            os.remove(shot)
-                        except OSError:
-                            pass
-                    if desc:
-                        target_text = f"[对方发来一张图片：{desc}]"
-                        print(f"[vision] {name}: {desc[:60]}")
-            except Exception as e:
-                print("vision pipeline error:", e)
         elif last_bubble["kind"] == "file":
-            # 对方发来文件：从微信文件存储找文件 → 解析内容 → 作为回复对象
+            # 对方发来文件：从内容里提取文件名，本地解析内容
             fname = wxbot_files.filename_from_bubble(last_bubble["text"])
+            if not fname:
+                fm = re.search(r"<title>([^<]{1,60})</title>", last_bubble["text"])
+                fname = fm.group(1) if fm else (last_bubble["text"][:20] or "未知文件")
             target_text = f"[对方发来一个文件「{fname}」]"
             try:
                 fpath = wxbot_files.find_file(fname)
@@ -1061,40 +1036,36 @@ def poll_once(cfg, state, hwnd):
                     target_text = f"[对方发来一个文件「{fname}」，内容如下：\n{fcontent}]"
                     print(f"[file] {name}: {fname} parsed {len(fcontent)} chars")
                 else:
-                    target_text = f"[对方发来一个文件「{fname}」（本地还没下载完成，看不到内容）]"
                     print(f"[file] {name}: {fname} not found in storage")
             except Exception as e:
                 print("file pipeline error:", e)
         else:
             target_text = last_bubble["text"]
-        sender = parse_sender(last) if is_group else None
-        # 配对校验：预览行「昵称: 内容」的内容必须跟我们要回复的气泡文本对得上，
-        # 否则说明昵称-消息配对不可靠（预览发送者≠气泡发送者），宁可不给模型昵称，
-        # 拿不准一律按普通群友处理，防止误伤友军
-        if sender:
-            pm = re.match(r"^[^\s:：\[\]]{1,30}[:：](.*)$",
-                          re.sub(r"^\[(\d+条|有人@我)\]\s*", "", last or ""))
-            preview_content = (pm.group(1) if pm else "").strip()
-            if target_text[:20] not in preview_content and preview_content[:20] not in target_text:
-                sender = None
+        # 群聊发送者昵称：数据库 sender 权威（替代 OCR 预览解析）
+        sender = last_bubble.get("sender") if is_group else None
+        if sender in ("我", "对方", None, ""):
+            sender = None
         # 硬性标注对线目标：昵称同时包含 matcher 里所有关键词才算目标，否则一律群友
         matcher = (cfg["reply"].get("target_matcher", {}) or {}).get(name, {})
         must_all = [k.lower() for k in matcher.get("contains_all", [])]
         is_target = bool(sender) and bool(must_all) and all(k in sender.lower() for k in must_all)
         if state.replied_to(name, target_text):
             print(f"[poll] {name} skip: already replied to this msg")
-            state.mark_seen(name, last)
+            state.mark_seen(name, last_fp)
             state.save()
             continue
         if state.recently_sent(name, target_text):
-            state.mark_seen(name, last)
+            state.mark_seen(name, last_fp)
             state.save()
             continue
 
         # build context lines (recent messages with side markers) for the LLM
         ctx_lines = []
         for m in msgs[-ctx_n:]:
-            who = "我" if m["side"] == "own" else "对方"
+            if m["side"] == "own":
+                who = "我"
+            else:
+                who = m.get("sender") if (is_group and m.get("sender") not in (None, "", "我", "对方")) else "对方"
             if m["kind"] == "text":
                 ctx_lines.append(f"{who}: {m['text'][:100]}")
             elif m["kind"] == "image":
@@ -1139,7 +1110,7 @@ def poll_once(cfg, state, hwnd):
             is_skip = re.fullmatch(r"\s*\[SKIP\]\s*", reply) is not None
         if is_skip:
             print(f"[poll] {name} model chose to SKIP")
-            state.mark_seen(name, last)
+            state.mark_seen(name, last_fp)
             state.save()
             continue
 
@@ -1151,7 +1122,7 @@ def poll_once(cfg, state, hwnd):
         # 分句发送，一批最多 max_sentences 句，句间小随机停顿
         sentences = split_sentences(reply, cfg["reply"].get("max_sentences", 4))
         if not sentences:
-            state.mark_seen(name, last)
+            state.mark_seen(name, last_fp)
             state.save()
             continue
         sd = cfg["reply"].get("sentence_delay_s", [1.0, 2.5])
@@ -1246,47 +1217,84 @@ def poll_once(cfg, state, hwnd):
                         if body:
                             if not _roll(beh["at"]):
                                 print(f"[wxbot] @ throttled ({beh['at']:.0%}): {at_name}")
-                                wx.send_text(name, body)
+                                ok = wx.send_text(name, body)
                             else:
                                 print(f"[wxbot] send with @: {at_name}")
-                                wx.send_text_at(name, at_name, body)
-                            state.record_sent(name, sent)
-                            sent_ok += 1
+                                ok = wx.send_text_at(name, at_name, body)
+                            if ok:
+                                state.record_sent(name, sent)
+                                sent_ok += 1
+                            else:
+                                send_failures += 1
                             if i < len(sentences) - 1:
                                 time.sleep(random.uniform(sd[0], sd[1]))
                             continue
-                wx.send_text(name, sent)
-                state.record_sent(name, sent)
-                sent_ok += 1
+                if wx.send_text(name, sent):
+                    state.record_sent(name, sent)
+                    sent_ok += 1
+                else:
+                    print(f"[wxbot] send_text FAILED to {name}: {sent[:40]!r}")
+                    send_failures += 1
+                    break
                 if i < len(sentences) - 1:
                     time.sleep(random.uniform(sd[0], sd[1]))
             except Exception as e:
                 print(f"send sentence to {name} error:", e)
                 send_failures += 1
                 break
-        if send_failures == 0:
+        if send_failures == 0 or sent_ok:
+            # 有句子成功发出即算这轮回复完成（含部分成功：避免下轮重复回复）
             state.mark_replied(name, target_text)
             state.mark_reply_ts(name)
-            state.mark_seen(name, last)
+            state.mark_seen(name, last_fp)
             # 记忆系统：每 N 轮做一次事实提取（workspace 隔离）
             mem_cfg = cfg.get("memory") or {}
             if mem_cfg.get("enabled", True) and wxbot_memory.should_extract(state, name, int(mem_cfg.get("every_n_replies", 5))):
                 _memory_extract(cfg, name, ctx_lines)
             state.save()
             replied.append((name, reply))
-        elif sent_ok:
-            print(f"[wxbot] partial send to {name}: {sent_ok}/{len(sentences)}，保留消息状态供后续处理")
-            state.save()
+            if send_failures:
+                print(f"[wxbot] partial send to {name}: {sent_ok}/{len(sentences)} ok")
 
     return replied, len(sessions)
+
+class _Tee:
+    """stdout 双写：终端 + wxbot_run.log（守护进程后台跑时重定向输出偶发丢失）。"""
+    def __init__(self, original, path):
+        self.original = original
+        self.file = open(path, "a", encoding="utf-8", buffering=1)
+        self.file.write(f"\n===== wxbot start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+    def write(self, s):
+        try:
+            self.original.write(s)
+        except Exception:
+            pass
+        self.file.write(s)
+    def flush(self):
+        try:
+            self.original.flush()
+        except Exception:
+            pass
+        self.file.flush()
+    def reconfigure(self, **kw):
+        try:
+            self.original.reconfigure(**kw)
+        except Exception:
+            pass
+
 
 def main():
     cfg = load_config()
     if not cfg.get("enabled", True):
         print("wxbot disabled in config")
         return
+    sys.stdout = _Tee(sys.stdout, os.path.join(BASE, "wxbot_run.log"))
     state = State(cfg["state_file"])
     hwnd = wx.find_wechat()
+    try:
+        wx.park_wechat(hwnd)  # 停靠右下角，不占主工作区
+    except Exception:
+        pass
     print(f"wxbot started. hwnd={hwnd} interval={cfg['poll_interval_seconds']}s")
     # one-shot mode: python wxbot.py --once
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
@@ -1297,40 +1305,19 @@ def main():
             state.save()
         return
     uia_fail_streak = 0
-    last_uia_restart = 0.0
     while True:
         try:
+            hwnd = wx.find_wechat()  # 每轮重取（窗口可能被关闭/重开）
             replied, n_sessions = poll_once(cfg, state, hwnd)
             if replied:
                 print(f"replied {len(replied)} conversation(s)")
+            uia_fail_streak = 0
         except Exception as e:
             print("poll error:", e)
             n_sessions = -1
-        # UIA 自愈：空会话列表是有效结果，只有 list_sessions 异常才累计失败。
-        if n_sessions >= 0:
-            uia_fail_streak = 0
-        else:
             uia_fail_streak += 1
-        if uia_fail_streak == 3:
-            try:
-                refreshed = wx.find_wechat()
-                if refreshed != hwnd:
-                    hwnd = refreshed
-                print(f"[wxbot] UIA transient failure ({uia_fail_streak}/12), refreshed hwnd={hwnd}")
-            except Exception as e:
-                print("[wxbot] UIA soft recovery failed:", e)
-        if should_restart_uia(uia_fail_streak, last_uia_restart, threshold=12, cooldown=120):
-            print("[wxbot] UIA unavailable for about 1 minute, restarting WeChat...")
-            # 无论成功与否都记录尝试时间。否则启动尚未完成时，下一轮会再次 taskkill，
-            # 表现为微信窗口被关掉后一直无法真正启动。
-            last_uia_restart = time.time()
-            try:
-                hwnd = wx.restart_wechat()
-                uia_fail_streak = 0
-                print(f"[wxbot] WeChat restarted, hwnd={hwnd}")
-            except Exception as e:
-                print("restart_wechat error:", e)
-            # 失败计数保留，但 2 分钟内不再杀进程，给新微信充分初始化时间。
+            if uia_fail_streak % 6 == 1:
+                print("[wxbot] WeChat window/db unavailable, waiting...")
         time.sleep(cfg["poll_interval_seconds"])
 
 if __name__ == "__main__":
