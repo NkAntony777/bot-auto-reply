@@ -92,8 +92,26 @@ tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终�
 ```
 
 前置条件：
-- 微信 PC 4.x 已登录且主窗口存在（daemon 启动时会自动停靠到屏幕右下角 1000×1150）
+- 微信 PC 4.x 已登录且主窗口存在（daemon 会自动停靠，见下方"虚拟显示器"）
 - LLM key 就位：`wxbot_config.json` 的 `llm.api_key`（内联，该文件已 gitignore）或环境变量
+
+### 虚拟显示器（零桌面打扰方案）
+
+已安装 Amyuni usbmmidd 虚拟显示驱动，系统常驻一块**物理上不存在的屏幕**
+（本机：主屏 2560×1600@125% + 虚拟屏 1600×1200@100%，在主屏右侧 x≥2560）。
+微信停靠在虚拟屏：操作系统认为它"可见"，ImageGrab 能截取，点击落在虚拟屏坐标——
+**用户物理屏幕完全看不到微信、感受不到鼠标键盘**。
+
+- 驱动安装备忘（已装好）：解压 usbmmidd_v2.zip → 管理员运行
+  `deviceinstaller64 install usbmmidd.inf usbmmidd` + `enableidd 1`；
+  分辨率用 `ChangeDisplaySettingsEx` API 调（`setresolution` 子命令在 v2 无效）
+- 实现要点（wxmini2.py）：
+  - `ImageGrab.grab` 默认只截主屏、副屏区域全黑——必须 `all_screens=True`
+  - 跨屏移动触发 WM_DPICHANGED，应用自缩放（125%→100% 即 ×0.8）——park 两步法：
+    先收敛尺寸、再纯移位置（尺寸不动不触发重缩放）；位置必须钳制到
+    **目标监视器矩形**（EnumDisplayMonitors 实测；虚拟桌面边界盒在多屏高度
+    不一致时给出错误高度，窗口掉屏外截出黑图）
+  - 无副屏时自动退回"主屏右下角停靠"，行为不变
 
 行为要点：
 - **不抢输入**：发送前等系统键鼠空闲 ≥6s（最多等 2 分钟超时强发）；发完把焦点还给用户原窗口

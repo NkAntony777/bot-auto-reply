@@ -75,13 +75,13 @@ def ensure_window_in_screen(hwnd: int):
     """如果微信窗口超出屏幕（部分在屏幕外），自动 MoveWindow 移回屏幕内。
     ImageGrab 截屏方案的关键：窗口必须在屏幕内可见。"""
     l, t, r, b, w, h = get_window_rect(hwnd)
-    sw, sh = get_screen_size()
-    if l >= 0 and t >= 0 and r <= sw and b <= sh:
+    vx, vy, vw, vh = get_virtual_screen()
+    if l >= vx and t >= vy and r <= vx + vw and b <= vy + vh:
         return
-    new_l = max(0, min(sw - 100, l)) if l < 0 else min(sw - 100, l)
-    new_t = max(0, min(sh - 100, t)) if t < 0 else min(sh - 100, t)
-    new_w = min(w, int(sw * 0.8))
-    new_h = min(h, int(sh * 0.8))
+    new_l = max(vx, min(vx + vw - 100, l)) if l < vx else min(vx + vw - 100, l)
+    new_t = max(vy, min(vy + vh - 100, t)) if t < vy else min(vy + vh - 100, t)
+    new_w = min(w, int(vw * 0.8))
+    new_h = min(h, int(vh * 0.8))
     print(f"[wxmini2] ensure_window_in_screen: ({l},{t})-({r},{b}) -> ({new_l},{new_t}) {new_w}x{new_h}")
     C.windll.user32.MoveWindow(hwnd, new_l, new_t, new_w, new_h, True)
     time.sleep(0.3)
@@ -109,16 +109,54 @@ def get_window_rect(hwnd: int) -> Tuple[int, int, int, int, int, int]:
     return r.left, r.top, r.right, r.bottom, r.right - r.left, r.bottom - r.top
 
 def get_screen_size() -> Tuple[int, int]:
-    """返回 (w, h) 屏幕尺寸"""
+    """返回 (w, h) 主屏尺寸"""
     return _GetSystemMetrics(0), _GetSystemMetrics(1)
 
+
+def get_virtual_screen() -> Tuple[int, int, int, int]:
+    """返回整个虚拟桌面 (x, y, w, h)——包含主屏+副屏/虚拟屏的全范围。
+    多显示器时窗口可以停在副屏（虚拟显示器方案），裁剪必须用这个范围。"""
+    return (_GetSystemMetrics(76), _GetSystemMetrics(77),
+            _GetSystemMetrics(78), _GetSystemMetrics(79))
+
+
+def secondary_screen_rect() -> Optional[Tuple[int, int, int, int]]:
+    """有副屏（含虚拟显示器）时返回其真实矩形 (x, y, w, h)，否则 None。
+    必须用 EnumDisplayMonitors 逐监视器取——虚拟桌面边界盒在多屏高度不一致时
+    会给出错误的"副屏高度"（如主屏 1600 高 + 虚拟屏 1200 高 → 误报 1600）。"""
+
+    class _MIEX(C.Structure):
+        _fields_ = [("cbSize", C.c_uint32), ("rcMonitor", C.c_long * 4),
+                    ("rcWork", C.c_long * 4), ("dwFlags", C.c_uint32),
+                    ("szDevice", C.c_wchar * 32)]
+
+    found: list = []
+    MONITORENUMPROC = C.WINFUNCTYPE(C.c_bool, C.c_void_p, C.c_void_p, C.POINTER(C.c_long * 4), C.c_void_p)
+    def _cb(hmon, _hdc, _rect, _lp):
+        mi = _MIEX()
+        mi.cbSize = C.sizeof(mi)
+        if C.windll.user32.GetMonitorInfoW(hmon, C.byref(mi)):
+            x, y, r, b = mi.rcMonitor
+            primary = bool(mi.dwFlags & 1)
+            found.append((primary, x, y, r - x, b - y))
+        return True
+    try:
+        C.windll.user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(_cb), 0)
+    except Exception:
+        return None
+    for primary, x, y, w, h in found:
+        if not primary and w > 300 and h > 300:
+            return (x, y, w, h)
+    return None
+
+
 def clip_to_screen(l: int, t: int, r: int, b: int) -> Tuple[int, int, int, int]:
-    """把窗口矩形裁剪到屏幕范围内"""
-    sw, sh = get_screen_size()
-    l = max(0, min(sw - 1, l))
-    t = max(0, min(sh - 1, t))
-    r = max(0, min(sw, r))
-    b = max(0, min(sh, b))
+    """把窗口矩形裁剪到虚拟桌面范围内（多显示器安全）"""
+    vx, vy, vw, vh = get_virtual_screen()
+    l = max(vx, min(vx + vw - 1, l))
+    t = max(vy, min(vy + vh - 1, t))
+    r = max(vx, min(vx + vw, r))
+    b = max(vy, min(vy + vh, b))
     return l, t, r, b
 
 def pw_shot(hwnd: int):
@@ -576,24 +614,59 @@ def wait_user_idle(before_s: float = _IDLE_BEFORE_SEND_S,
 
 
 def park_wechat(hwnd: int):
-    """把微信窗口缩小停到屏幕右下角，不占主工作区（发送时会临时置前）。"""
-    sw, sh = get_screen_size()
-    w = min(_PARK_W, sw - 80)
-    h = min(PARK_H, sh - 120)
-    l, t, r, b, _, _ = get_window_rect(hwnd)
-    want_l, want_t = sw - w - 16, sh - h - 64
-    if abs(l - want_l) < 12 and abs(t - want_t) < 12 and abs((r - l) - w) < 12:
-        return  # 已停好
-    C.windll.user32.MoveWindow(hwnd, want_l, want_t, w, h, True)
+    """停靠微信窗口：有副屏/虚拟显示器 → 停到副屏（物理屏幕完全不可见，
+    ImageGrab 仍能截取）；否则退回主屏右下角小窗。
+    跨屏会触发 WM_DPICHANGED（应用自缩放，如 125%→100% 即 ×0.8），尺寸会跳；
+    用收敛循环处理：移动→实测→按比例修正请求→钳制到目标屏矩形内。"""
+    sec = secondary_screen_rect()
+    if sec:
+        sx, sy, sw, sh = sec
+        req_w = min(_PARK_W, sw - 8)
+        req_h = min(PARK_H, sh - 8)
+    else:
+        pw, ph = get_screen_size()
+        sx, sy, sw, sh = 0, 0, pw, ph
+        req_w = min(_PARK_W, sw - 80)
+        req_h = min(PARK_H, sh - 120)
+
+    # 第一步：收敛尺寸（跨屏 WM_DPICHANGED 会让应用自缩放；按实测比例修正请求）
+    for _ in range(4):
+        l, t, r, b, cw, ch = get_window_rect(hwnd)
+        C.windll.user32.MoveWindow(hwnd, l, t, req_w, req_h, True)
+        time.sleep(0.5)
+        l, t, r, b, cw, ch = get_window_rect(hwnd)
+        if abs(cw - req_w) < 24 and abs(ch - req_h) < 24:
+            break
+        if cw > 0:
+            rx = req_w / cw
+            req_w = min(int(req_w * rx), sw - 8)
+            req_h = min(int(req_h * rx), sh - 8)
+    # 第二步：纯位置移动（尺寸不变 → 不触发 DPI 重缩放，位置才能站住）
+    l, t, r, b, cw, ch = get_window_rect(hwnd)
+    if sec:
+        want_l = sx + max(0, (sw - cw) // 2)
+    else:
+        want_l = sx + sw - cw - 16
+    want_t = min(sy + max(0, (sh - ch) // 2), sy + sh - ch)
+    C.windll.user32.MoveWindow(hwnd, want_l, want_t, cw, ch, True)
     time.sleep(0.4)
+    # 复核：整窗必须在目标屏内（掉出屏外的部分 ImageGrab 截出来是黑的）
+    l, t, r, b, cw, ch = get_window_rect(hwnd)
+    if not (l >= sx - 8 and t >= sy - 8 and r <= sx + sw + 8 and b <= sy + sh + 8):
+        C.windll.user32.MoveWindow(hwnd,
+                                   max(sx, min(sx + sw - cw, l)),
+                                   max(sy, min(sy + sh - ch, t)),
+                                   cw, ch, True)
+        time.sleep(0.3)
 
 def _grab_window(hwnd: int):
     """ImageGrab 截窗口屏幕区域。PrintWindow 对输入框等独立渲染层是盲区，
-    一切"验证界面状态"的截图必须走这里（前提：窗口在前台且在屏幕内）。"""
+    一切"验证界面状态"的截图必须走这里（前提：窗口在前台且在屏幕内）。
+    多显示器：必须 all_screens=True，否则只截主屏（副屏区域全黑）。"""
     from PIL import ImageGrab
     l, t, r, b, w, h = get_window_rect(hwnd)
     l, t, r, b = clip_to_screen(l, t, r, b)
-    return ImageGrab.grab(bbox=(l, t, r, b))
+    return ImageGrab.grab(bbox=(l, t, r, b), all_screens=True)
 
 
 def _chat_content_px(hwnd: int) -> int:
