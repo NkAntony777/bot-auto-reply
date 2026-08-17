@@ -71,20 +71,48 @@ def force_foreground(hwnd: int):
     time.sleep(0.2)
 
 
+def _monitor_rects() -> List[Tuple[int, int, int, int]]:
+    """所有监视器的真实矩形列表 [(x,y,w,h), ...]（EnumDisplayMonitors）。"""
+    class _MIEX(C.Structure):
+        _fields_ = [("cbSize", C.c_uint32), ("rcMonitor", C.c_long * 4),
+                    ("rcWork", C.c_long * 4), ("dwFlags", C.c_uint32),
+                    ("szDevice", C.c_wchar * 32)]
+    found: list = []
+    MONITORENUMPROC = C.WINFUNCTYPE(C.c_bool, C.c_void_p, C.c_void_p, C.POINTER(C.c_long * 4), C.c_void_p)
+    def _cb(hmon, _hdc, _rect, _lp):
+        mi = _MIEX()
+        mi.cbSize = C.sizeof(mi)
+        if C.windll.user32.GetMonitorInfoW(hmon, C.byref(mi)):
+            x, y, r, b = mi.rcMonitor
+            found.append((x, y, r - x, b - y))
+        return True
+    try:
+        C.windll.user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(_cb), 0)
+    except Exception:
+        pass
+    return found
+
+
 def ensure_window_in_screen(hwnd: int):
-    """如果微信窗口超出屏幕（部分在屏幕外），自动 MoveWindow 移回屏幕内。
-    ImageGrab 截屏方案的关键：窗口必须在屏幕内可见。"""
+    """保证微信窗口停在目标屏上（虚拟显示器方案的核心守卫）：
+    - 有副屏（虚拟显示器）→ 必须整窗在副屏内；微信会被自己的位置记忆/
+      托盘复活弹回主屏，发现就停回去
+    - 无副屏 → 整窗在任一屏内即可，出界才重新停靠
+    不能按"虚拟桌面边界盒"判断——骑跨两屏/落在无监视器区域都会截出黑图。"""
     l, t, r, b, w, h = get_window_rect(hwnd)
-    vx, vy, vw, vh = get_virtual_screen()
-    if l >= vx and t >= vy and r <= vx + vw and b <= vy + vh:
+    if w <= 0 or h <= 0:
         return
-    new_l = max(vx, min(vx + vw - 100, l)) if l < vx else min(vx + vw - 100, l)
-    new_t = max(vy, min(vy + vh - 100, t)) if t < vy else min(vy + vh - 100, t)
-    new_w = min(w, int(vw * 0.8))
-    new_h = min(h, int(vh * 0.8))
-    print(f"[wxmini2] ensure_window_in_screen: ({l},{t})-({r},{b}) -> ({new_l},{new_t}) {new_w}x{new_h}")
-    C.windll.user32.MoveWindow(hwnd, new_l, new_t, new_w, new_h, True)
-    time.sleep(0.3)
+    sec = secondary_screen_rect()
+    if sec:
+        sx, sy, sw, sh = sec
+        if l >= sx - 8 and t >= sy - 8 and r <= sx + sw + 8 and b <= sy + sh + 8:
+            return  # 整窗在副屏内
+        park_wechat(hwnd)  # 跳去主屏/骑跨了 → 停回来
+        return
+    for mx, my, mw, mh in _monitor_rects():
+        if l >= mx - 8 and t >= my - 8 and r <= mx + mw + 8 and b <= my + mh + 8:
+            return
+    park_wechat(hwnd)
 
 # ============== 截图 (ImageGrab - 截整个屏幕的窗口区域) ==============
 # 关键发现：微信 4.x 聊天区是 Chromium WebView 离屏渲染
@@ -623,6 +651,12 @@ def park_wechat(hwnd: int):
         sx, sy, sw, sh = sec
         req_w = min(_PARK_W, sw - 8)
         req_h = min(PARK_H, sh - 8)
+        # 秒退：微信会被自己的位置记忆/托盘复活弹回主屏，但每次都重新收敛
+        # 会反复触发 DPI 缩放折腾窗口——已经停好就不再动
+        l, t, r, b, cw, ch = get_window_rect(hwnd)
+        if (l >= sx - 8 and t >= sy - 8 and r <= sx + sw + 8 and b <= sy + sh + 8
+                and abs(cw - req_w) < 60):
+            return
     else:
         pw, ph = get_screen_size()
         sx, sy, sw, sh = 0, 0, pw, ph
@@ -881,6 +915,8 @@ def _send_text_core(hwnd: int, contact: str, text: str) -> bool:
     l, t, r, b, w, h = get_window_rect(hwnd)
     # 点击输入框文本区中部（y=0.89，避开底部按钮行；之前的 0.92 会点偏）
     for attempt in range(3):
+        # 偶发焦点丢失：每次重试前重新置前（虚拟屏上点击可能被时序问题吃掉）
+        force_foreground(hwnd)
         in_x = l + int(w * 0.55)
         in_y = t + int(h * (0.89 - attempt * 0.02))
         pyautogui.click(in_x, in_y, duration=0.1)
@@ -896,10 +932,11 @@ def _send_text_core(hwnd: int, contact: str, text: str) -> bool:
         pyautogui.hotkey('ctrl', 'v', interval=0.05)
         time.sleep(0.5)
         # 粘贴判定（像素）：输入框暗像素显著增加 = 文字已进框
-        # 阈值随文本长度缩放（短消息 2 个字只有 ~200 暗像素，固定阈值会误杀）
+        # 阈值随文本长度缩放（虚拟屏 100% 缩放下文字暗像素比主屏 125% 少，
+        # 阈值按低线标定：2 个字 ~44px，长消息 200px 封顶）
         after = _input_dark_px(hwnd)
-        need = max(80, min(250, 60 * len(re.sub(r"\s", "", text))))
-        if after > base + 60 and after > need:
+        need = max(40, min(200, 40 * len(re.sub(r"\s", "", text))))
+        if after > base + 40 or after > need:
             break
         print(f"[wxmini2] paste verify fail (attempt {attempt+1}): dark px {base} -> {after} (need {need})")
     else:

@@ -1318,6 +1318,12 @@ def main():
             uia_fail_streak += 1
             if uia_fail_streak % 6 == 1:
                 print("[wxbot] WeChat window/db unavailable, waiting...")
+        # 看门狗：微信会被自己的位置记忆/托盘复活弹回主屏，
+        # 每轮检查，跳回去了就停回虚拟显示器（已停靠时秒退，无开销）
+        try:
+            wx.ensure_window_in_screen(hwnd)
+        except Exception:
+            pass
         time.sleep(cfg["poll_interval_seconds"])
 
 if __name__ == "__main__":
