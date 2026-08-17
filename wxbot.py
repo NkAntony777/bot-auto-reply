@@ -776,10 +776,10 @@ def _llm_call(cfg, system, user_content):
         if _thinking is not None:
             payload["thinking"] = _thinking
         try:
-            data = _http_post_json(url, payload, a["_key"], timeout=60)
+            data = _http_post_json(url, payload, a["_key"], timeout=120)
             reply = data["choices"][0]["message"].get("content", "").strip()
             if not reply:
-                data = _http_post_json(url, payload, a["_key"], timeout=60)
+                data = _http_post_json(url, payload, a["_key"], timeout=120)
                 reply = data["choices"][0]["message"].get("content", "").strip()
                 if not reply:
                     raise ValueError("empty LLM response")
@@ -794,7 +794,7 @@ def _llm_call(cfg, system, user_content):
                 retry_payload = dict(payload)
                 retry_payload.pop("temperature", None)
                 try:
-                    data = _http_post_json(url, retry_payload, a["_key"], timeout=60)
+                    data = _http_post_json(url, retry_payload, a["_key"], timeout=120)
                     reply = data["choices"][0]["message"]["content"].strip()
                     print(f"[llm] retry without temperature ok: {a['model']}")
                     return reply[:cfg["reply"].get("max_reply_chars", 300)]

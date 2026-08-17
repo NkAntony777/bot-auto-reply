@@ -94,7 +94,9 @@
       },
       "style_learning": {
         "enabled": true,
-        "personas": ["style_mirror"],
+        "personas": [
+          "style_mirror"
+        ],
         "sample_count": 8,
         "max_sample_chars": 80,
         "strength": 0.85
@@ -113,7 +115,7 @@
     "model": "YOUR_MODEL",
     "api_key_env": "YOUR_LLM_KEY_ENV",
     "temperature": 0.9,
-    "max_tokens": 400,
+    "max_tokens": 2400,
     "context_window": 32000,
     "fallbacks": [
       {
