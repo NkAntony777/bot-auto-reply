@@ -12,6 +12,7 @@ Design:
 Config: wxbot_config.json next to this file.
 """
 import copy, json, os, sys, time, random, re, hashlib
+import socket, subprocess
 import unicodedata
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +21,6 @@ import wxmini2 as wx
 import wxbot_files
 import wxbot_memory
 import wxbot_context
-import wxbot_search
 import wxbot_agent
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -112,7 +112,8 @@ DEFAULT_CONFIG = {
         "daily_chars": 800
     },
     "state_file": os.path.join(BASE, "wxbot_state.json"),
-    "own_nicknames": ["爱而不恨"]
+    "own_nicknames": ["爱而不恨"],
+    "dashboard": {"enabled": True, "port": 8788}
     # agent 段的默认值在 wxbot_agent.DEFAULT_AGENT_CFG（避免循环导入），
     # 配置文件缺该段时由 wxbot_agent._acfg 兜底。
 }
@@ -402,14 +403,17 @@ def pick_image(cfg, keyword=""):
     return random.choice(pool)
 
 # ---------------------------------------------------------------- custom stickers (爱心收藏)
-_STICKER_CACHE = {"mtime": 0.0, "items": []}
+_STICKER_CACHE = {"mtime": 0.0, "items": [], "dead": False}
 
 def load_sticker_catalog(cfg):
-    """读 stickers/catalog.json，带 mtime 缓存。返回 sticker dict 列表（可能为空）。"""
+    """读 stickers/catalog.json，带 mtime 缓存。返回 sticker dict 列表（可能为空）。
+    catalog.json 缺失/损坏时打一次错后本进程静默（避免每轮 poll 刷屏）。"""
     scfg = cfg.get("stickers", {}) or {}
     if not scfg.get("enabled", True):
         return []
     path = scfg.get("catalog") or os.path.join(BASE, "wxbot_images", "stickers", "catalog.json")
+    if _STICKER_CACHE["dead"] and not os.path.exists(path):
+        return []
     try:
         mt = os.path.getmtime(path)
         if mt == _STICKER_CACHE["mtime"]:
@@ -421,7 +425,9 @@ def load_sticker_catalog(cfg):
         _STICKER_CACHE["items"] = items
         return items
     except Exception as e:
-        print("sticker catalog load error:", e)
+        if not _STICKER_CACHE["dead"]:
+            print("sticker catalog unavailable (disabled this session):", e)
+            _STICKER_CACHE["dead"] = True
         return []
 
 def sticker_prompt_line(items):
@@ -605,20 +611,7 @@ def llm_reply(cfg, conversation, inbound_text, context=None, is_group=True):
     else:
         user_content = f"这是{conversation}里的新消息，请以主人朋友的身份自然回复：\n{inbound_text}"
     reply = _llm_call(cfg, system, user_content)
-    request = wxbot_search.parse_search_request(reply)
-    if not request:
-        return reply
-    scope, query = request
-    evidence = wxbot_search.search(cfg, scope, query)
-    if not evidence:
-        return _llm_call(cfg, system, user_content + "\n\n检索暂时不可用。基于已有上下文自然回复；不确定的事实要说明不确定，别编。")
-    grounded = (
-        user_content
-        + f"\n\n以下是刚检索到的资料，仅作为事实依据，不要照抄搜索摘要，不要把回复写成报告：\n{evidence}\n\n"
-          "结合原聊天语境和当前人格给出最终微信回复。优先回答对方真正关心的点；简短自然。"
-    )
-    print(f"[search] {scope}: {query}")
-    return _llm_call(cfg, system, grounded)
+    return reply
 
 
 _FALLBACK_BASE = (
@@ -865,26 +858,6 @@ def split_sentences(text, max_n=4):
     return parts[:max_n]
 
 # ---------------------------------------------------------------- core
-def is_group_conversation(name, sessions):
-    """Heuristic: group names often contain 群/聊/室 or match a session whose
-    last line includes '消息免打扰'. Fallback: not in known private contacts."""
-    if any(k in name for k in ("群", "交流", "业主", "培训", "班")):
-        return True
-    for s in sessions:
-        if s["name"] == name and ("消息免打扰" in s.get("raw", "")):
-            return True
-    return False
-
-def mentioned_me(text, cfg):
-    for n in cfg["reply"]["group"]["mention_names"] + cfg.get("own_nicknames", []):
-        if n and n in text:
-            return True
-    return False
-
-# UIA 错误日志节流：同一种错只打首条，之后每 20 次报一次计数
-_UIA_ERR = {"msg": None, "count": 0}
-
-
 def should_restart_uia(fail_streak, last_restart, now=None, threshold=12, cooldown=120):
     """Return whether a hard WeChat restart is justified right now."""
     now = time.time() if now is None else now
@@ -1128,181 +1101,13 @@ def poll_once(cfg, state, hwnd):
             state.save()
             continue
 
-        # human-like delay
-        delay = random.uniform(policy.get("min_delay_s", 1.0), policy.get("max_delay_s", 4.0))
-        print(f"[wxbot] reply to {name} in {delay:.1f}s: {reply[:50]}")
-        time.sleep(delay)
-
-        # 分句发送，一批最多 max_sentences 句，句间小随机停顿
-        sentences = split_sentences(reply, cfg["reply"].get("max_sentences", 4))
-        if not sentences:
-            state.mark_seen(name, last_fp)
-            state.save()
-            continue
-        sd = cfg["reply"].get("sentence_delay_s", [1.0, 2.5])
-        sent_ok = 0
-        send_failures = 0
-        # 行为旋钮：按人格频率硬性节流（掷骰子，没中就退化为纯文字/跳过）
-        beh = behavior_for(cfg, persona_for_conversation(cfg, name, is_group))
-        for i, sent in enumerate(sentences):
-            try:
-                # [Q] 前缀：引用对方那条消息再回复（第一句有效，按 quote 频率节流）
-                if i == 0:
-                    q_m = re.match(r"^\[Q\]\s*(.+)$", sent.strip(), re.S)
-                    if q_m and q_m.group(1).strip():
-                        body = q_m.group(1).strip()
-                        if _roll(beh["quote"]) and last_bubble.get("rect"):
-                            print(f"[wxbot] quote reply to {name}")
-                            try:
-                                wx.quote_reply(name, last_bubble["rect"], body)
-                                state.record_sent(name, body)
-                                sent_ok += 1
-                            except Exception as e:
-                                print("quote reply error:", e)
-                                wx.send_text(name, body)
-                                state.record_sent(name, body)
-                                sent_ok += 1
-                        else:
-                            wx.send_text(name, body)
-                            state.record_sent(name, body)
-                            sent_ok += 1
-                        if i < len(sentences) - 1:
-                            time.sleep(random.uniform(sd[0], sd[1]))
-                        continue
-                # [EMOJI:表情名] 标记：发微信表情
-                em_m = re.match(r"^\[(?:EMOJI|表情):([^\]]+)\]$", sent.strip())
-                if em_m:
-                    if not _roll(beh["emoji"]):
-                        print(f"[wxbot] emoji throttled ({beh['emoji']:.0%}): {em_m.group(1)}")
-                        continue
-                    print(f"[wxbot] send emoji to {name}: {em_m.group(1)}")
-                    try:
-                        wx.send_emoji(name, em_m.group(1).strip())
-                        state.record_sent(name, f"[{em_m.group(1).strip()}]")
-                        sent_ok += 1
-                    except Exception as e:
-                        print(f"send emoji error:", e)
-                        send_failures += 1
-                    if i < len(sentences) - 1:
-                        time.sleep(random.uniform(sd[0], sd[1]))
-                    continue
-                # [STICKER:编号或关键词] 标记：发爱心收藏里的自定义贴纸
-                st_m = re.match(r"^\[(?:STICKER|贴纸):([^\]]+)\]$", sent.strip())
-                if st_m:
-                    if not _roll(beh["sticker"]):
-                        print(f"[wxbot] sticker throttled ({beh['sticker']:.0%}): {st_m.group(1)}")
-                        continue
-                    idx = resolve_sticker(load_sticker_catalog(cfg), st_m.group(1))
-                    if idx:
-                        print(f"[wxbot] send sticker to {name}: #{idx} ({st_m.group(1)})")
-                        try:
-                            wx.send_sticker(name, idx)
-                            state.record_sent(name, f"[贴纸#{idx}]")
-                            sent_ok += 1
-                        except Exception as e:
-                            print(f"send sticker error:", e)
-                            send_failures += 1
-                    else:
-                        print(f"[wxbot] sticker not resolved: {st_m.group(1)}")
-                    if i < len(sentences) - 1:
-                        time.sleep(random.uniform(sd[0], sd[1]))
-                    continue
-                # [AUDIO:stem] 标记：发语音（TTS 生成的 mp3 文件卡片）
-                au_m = re.match(r"^\[AUDIO(?::([^\]]*))?\]$", sent.strip())
-                if au_m:
-                    astem = (au_m.group(1) or "").strip()
-                    apath = None
-                    if astem:
-                        import wxbot_tts
-                        adir = wxbot_tts.audio_dir(cfg)
-                        for fn in os.listdir(adir) if os.path.isdir(adir) else []:
-                            if fn.startswith(astem) and fn.endswith((".mp3", ".wav")):
-                                apath = os.path.join(adir, fn)
-                                break
-                    if apath:
-                        print(f"[wxbot] send audio to {name}: {os.path.basename(apath)}")
-                        try:
-                            wx.send_file(name, apath)
-                            state.record_sent(name, f"[语音:{os.path.basename(apath)}]")
-                            sent_ok += 1
-                        except Exception as e:
-                            print(f"send audio error: {e}")
-                            send_failures += 1
-                    else:
-                        print(f"[wxbot] audio not resolved: {astem}")
-                    if i < len(sentences) - 1:
-                        time.sleep(random.uniform(sd[0], sd[1]))
-                    continue
-                # [IMG:关键词] 标记：发图片而不是文字
-                im_m = re.match(r"^\[(?:IMG(?::([^\]]*))?\]$)", sent.strip())
-                if im_m:
-                    img_path = (pick_image(cfg, (im_m.group(1) or "").strip())
-                                if cfg.get("images", {}).get("enabled", True) else None)
-                    # AI 生成图（gen_ 前缀）不走行为节流：那是模型按请求专门生成的
-                    generated = bool(img_path and os.path.basename(img_path).startswith("gen_"))
-                    if not generated and not _roll(beh["image"]):
-                        print(f"[wxbot] image throttled ({beh['image']:.0%})")
-                        continue
-                    if img_path:
-                        print(f"[wxbot] send image to {name}: {os.path.basename(img_path)}")
-                        try:
-                            wx.send_image(name, img_path)
-                            state.record_sent(name, f"[图片:{os.path.basename(img_path)}]")
-                            sent_ok += 1
-                        except Exception as e:
-                            print(f"send image error: {e}")
-                            send_failures += 1
-                    if i < len(sentences) - 1:
-                        time.sleep(random.uniform(sd[0], sd[1]))
-                    continue
-                # 第一句若以 @昵称 开头 → 真 @ 该群成员
-                if i == 0 and is_group:
-                    at_m = re.match(r"^@([^\s，,]{1,20})[\s，,]+(.*)$", sent, re.S)
-                    if at_m:
-                        at_name, body = at_m.group(1), at_m.group(2).strip()
-                        if body:
-                            if not _roll(beh["at"]):
-                                print(f"[wxbot] @ throttled ({beh['at']:.0%}): {at_name}")
-                                ok = wx.send_text(name, body)
-                            else:
-                                print(f"[wxbot] send with @: {at_name}")
-                                ok = wx.send_text_at(name, at_name, body)
-                            if ok:
-                                state.record_sent(name, sent)
-                                sent_ok += 1
-                            else:
-                                send_failures += 1
-                            if i < len(sentences) - 1:
-                                time.sleep(random.uniform(sd[0], sd[1]))
-                            continue
-                if wx.send_text(name, sent):
-                    state.record_sent(name, sent)
-                    sent_ok += 1
-                else:
-                    print(f"[wxbot] send_text FAILED to {name}: {sent[:40]!r}")
-                    send_failures += 1
-                    break
-                if i < len(sentences) - 1:
-                    time.sleep(random.uniform(sd[0], sd[1]))
-            except Exception as e:
-                import traceback
-                print(f"send sentence to {name} error:", e)
-                print(traceback.format_exc())
-                send_failures += 1
-                break
-        if send_failures == 0 or sent_ok:
-            # 有句子成功发出即算这轮回复完成（含部分成功：避免下轮重复回复）
-            state.mark_replied(name, target_text)
-            state.mark_reply_ts(name)
-            state.mark_seen(name, last_fp)
-            # 记忆系统：每 N 轮做一次事实提取（workspace 隔离）
-            mem_cfg = cfg.get("memory") or {}
-            if mem_cfg.get("enabled", True) and wxbot_memory.should_extract(state, name, int(mem_cfg.get("every_n_replies", 5))):
-                _memory_extract(cfg, name, ctx_lines)
-            state.save()
+        # 发送段独立函数（拆自 poll_once，行为不变）
+        done, sent_ok, total = _send_reply(cfg, state, name, reply, is_group,
+                                           last_bubble, is_target, ctx_lines,
+                                           last_fp, target_text)
+        if done:
             replied.append((name, reply))
-            if send_failures:
-                print(f"[wxbot] partial send to {name}: {sent_ok}/{len(sentences)} ok")
+
 
     return replied, len(sessions)
 
@@ -1331,12 +1136,123 @@ class _Tee:
             pass
 
 
+# ---------------------------------------------------------------- 单实例 + 状态心跳
+PID_FILE = os.path.join(BASE, "wxbot.pid")
+STATUS_FILE = os.path.join(BASE, "wxbot_status.json")
+
+
+def _wxbot_script_pids(script_name):
+    """列出所有命令行以 script_name 为脚本的 python 进程 pid。
+    排除自己及整条祖先链——任务运行器/终端常用 python 包一层 shell，
+    命令行里同样带脚本名，不排除会把自己的宿主杀掉连坐自尽。"""
+    me = os.getpid()
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' } "
+             "| ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }"],
+            capture_output=True, text=True, timeout=30).stdout
+    except Exception as e:
+        print("[wxbot] process scan failed:", e)
+        return []
+    parent = {}
+    hits = []
+    pat = re.compile(re.escape(script_name) + r"(\s|$)")
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        parent[pid] = ppid
+        # 脚本名须是命令行末尾的脚本参数，避免匹配到 wxbot_dashboard.py 等名字
+        if len(parts) == 3 and pat.search(parts[2].strip()):
+            hits.append(pid)
+    anc = set()
+    p = me
+    while p and p in parent and p not in anc:
+        anc.add(p)
+        p = parent[p]
+    return [p for p in hits if p != me and p not in anc]
+
+
+def ensure_single_instance(script_name="wxbot.py"):
+    """单实例守卫：杀掉所有其他同脚本实例，避免多进程竞争（双发/状态打架），再落 pid 文件。"""
+    others = _wxbot_script_pids(script_name)
+    for pid in others:
+        print(f"[wxbot] killing stale instance pid={pid}")
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+        except Exception as e:
+            print(f"[wxbot] kill pid={pid} failed:", e)
+    if others:
+        time.sleep(1.5)  # 等旧进程释放微信窗口/DB
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "started": time.time(),
+                       "script": script_name}, f)
+    except Exception as e:
+        print("[wxbot] pid file write failed:", e)
+
+
+def clear_pid_file():
+    """退出时清掉自己的 pid 文件（内容对不上则不动，避免误删新实例的）。"""
+    try:
+        with open(PID_FILE, "r", encoding="utf-8") as f:
+            if json.load(f).get("pid") != os.getpid():
+                return
+        os.remove(PID_FILE)
+    except Exception:
+        pass
+
+
+def write_status(**extra):
+    """每轮 poll 写一次心跳，供 dashboard 判断存活/退避/卡住。"""
+    d = {"pid": os.getpid(), "ts": time.time(),
+         "backoff_until": _LLM_BACKOFF["until"],
+         "backoff_streak": _LLM_BACKOFF["streak"]}
+    d.update(extra)
+    try:
+        tmp = STATUS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, STATUS_FILE)
+    except Exception:
+        pass
+
+
+def _maybe_start_dashboard(cfg):
+    """配置开启时拉起本地看台（端口已被占用说明已有看台在跑，不重复拉起）。"""
+    dcfg = cfg.get("dashboard") or {}
+    if not dcfg.get("enabled", False):
+        return
+    port = int(dcfg.get("port", 8788))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            return
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.join(BASE, "wxbot_dashboard.py"),
+             "--port", str(port)],
+            cwd=BASE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        print(f"[wxbot] dashboard at http://127.0.0.1:{port}")
+    except Exception as e:
+        print("[wxbot] dashboard spawn failed:", e)
+
+
 def main():
     cfg = load_config()
     if not cfg.get("enabled", True):
         print("wxbot disabled in config")
         return
     sys.stdout = _Tee(sys.stdout, os.path.join(BASE, "wxbot_run.log"))
+    ensure_single_instance()  # 先清场：任何旧实例（含别的 python 环境起的）都杀掉
+    _maybe_start_dashboard(cfg)
     state = State(cfg["state_file"])
     hwnd = wx.find_wechat()
     try:
@@ -1353,6 +1269,7 @@ def main():
             _give_back_wechat(hwnd)
         return
     uia_fail_streak = 0
+    replied = []
     try:
         import signal
         signal.signal(signal.SIGTERM,
@@ -1373,6 +1290,8 @@ def main():
                 uia_fail_streak += 1
                 if uia_fail_streak % 6 == 1:
                     print("[wxbot] WeChat window/db unavailable, waiting...")
+            write_status(sessions=n_sessions, replied=len(replied),
+                         uia_fail_streak=uia_fail_streak)
             # 看门狗：微信会被自己的位置记忆/托盘复活弹回主屏，
             # 每轮检查，跳回去了就停回虚拟显示器（已停靠时秒退，无开销）
             try:
@@ -1384,6 +1303,7 @@ def main():
         print("\n[wxbot] Ctrl+C, shutting down...")
     finally:
         state.save()
+        clear_pid_file()
         _give_back_wechat(hwnd)
 
 
@@ -1393,6 +1313,188 @@ def _give_back_wechat(hwnd):
         wx.restore_wechat_to_primary(wx.find_wechat())
     except Exception as e:
         print("restore wechat to primary failed:", e)
+
+def _send_reply(cfg, state, name, reply, is_group, last_bubble, is_target, ctx_lines, last_fp, target_text):
+    """poll_once 发送段：拟人延迟 → 分句逐发（[Q]/@/EMOJI/STICKER/AUDIO/IMG/文本）→
+    状态记账（replied/reply_ts/seen/记忆提取）。返回 (完成?, 已发句数, 总句数)。"""
+    policy = cfg["reply"]["group"] if is_group else cfg["reply"]["private"]
+    # 行为旋钮：按人格频率硬性节流
+    beh = behavior_for(cfg, persona_for_conversation(cfg, name, is_group))
+    # human-like delay
+    delay = random.uniform(policy.get("min_delay_s", 1.0), policy.get("max_delay_s", 4.0))
+    print(f"[wxbot] reply to {name} in {delay:.1f}s: {reply[:50]}")
+    time.sleep(delay)
+
+    # 分句发送，一批最多 max_sentences 句，句间小随机停顿
+    sentences = split_sentences(reply, cfg["reply"].get("max_sentences", 4))
+    if not sentences:
+        state.mark_seen(name, last_fp)
+        state.save()
+        return True, 0, 0
+    sd = cfg["reply"].get("sentence_delay_s", [1.0, 2.5])
+    sent_ok = 0
+    send_failures = 0
+    for i, sent in enumerate(sentences):
+        try:
+            # [Q] 前缀：引用对方那条消息再回复（第一句有效，按 quote 频率节流）
+            if i == 0:
+                q_m = re.match(r"^\[Q\]\s*(.+)$", sent.strip(), re.S)
+                if q_m and q_m.group(1).strip():
+                    body = q_m.group(1).strip()
+                    if _roll(beh["quote"]) and last_bubble.get("rect"):
+                        print(f"[wxbot] quote reply to {name}")
+                        try:
+                            wx.quote_reply(name, last_bubble["rect"], body)
+                            state.record_sent(name, body)
+                            sent_ok += 1
+                        except Exception as e:
+                            print("quote reply error:", e)
+                            wx.send_text(name, body)
+                            state.record_sent(name, body)
+                            sent_ok += 1
+                    else:
+                        wx.send_text(name, body)
+                        state.record_sent(name, body)
+                        sent_ok += 1
+                    if i < len(sentences) - 1:
+                        time.sleep(random.uniform(sd[0], sd[1]))
+                    continue
+            # [EMOJI:表情名] 标记：发微信表情
+            em_m = re.match(r"^\[(?:EMOJI|表情):([^\]]+)\]$", sent.strip())
+            if em_m:
+                if not _roll(beh["emoji"]):
+                    print(f"[wxbot] emoji throttled ({beh['emoji']:.0%}): {em_m.group(1)}")
+                    continue
+                print(f"[wxbot] send emoji to {name}: {em_m.group(1)}")
+                try:
+                    wx.send_emoji(name, em_m.group(1).strip())
+                    state.record_sent(name, f"[{em_m.group(1).strip()}]")
+                    sent_ok += 1
+                except Exception as e:
+                    print(f"send emoji error:", e)
+                    send_failures += 1
+                if i < len(sentences) - 1:
+                    time.sleep(random.uniform(sd[0], sd[1]))
+                continue
+            # [STICKER:编号或关键词] 标记：发爱心收藏里的自定义贴纸
+            st_m = re.match(r"^\[(?:STICKER|贴纸):([^\]]+)\]$", sent.strip())
+            if st_m:
+                if not _roll(beh["sticker"]):
+                    print(f"[wxbot] sticker throttled ({beh['sticker']:.0%}): {st_m.group(1)}")
+                    continue
+                idx = resolve_sticker(load_sticker_catalog(cfg), st_m.group(1))
+                if idx:
+                    print(f"[wxbot] send sticker to {name}: #{idx} ({st_m.group(1)})")
+                    try:
+                        wx.send_sticker(name, idx)
+                        state.record_sent(name, f"[贴纸#{idx}]")
+                        sent_ok += 1
+                    except Exception as e:
+                        print(f"send sticker error:", e)
+                        send_failures += 1
+                else:
+                    print(f"[wxbot] sticker not resolved: {st_m.group(1)}")
+                if i < len(sentences) - 1:
+                    time.sleep(random.uniform(sd[0], sd[1]))
+                continue
+            # [AUDIO:stem] 标记：发语音（TTS 生成的 mp3 文件卡片）
+            au_m = re.match(r"^\[AUDIO(?::([^\]]*))?\]$", sent.strip())
+            if au_m:
+                astem = (au_m.group(1) or "").strip()
+                apath = None
+                if astem:
+                    import wxbot_tts
+                    adir = wxbot_tts.audio_dir(cfg)
+                    for fn in os.listdir(adir) if os.path.isdir(adir) else []:
+                        if fn.startswith(astem) and fn.endswith((".mp3", ".wav")):
+                            apath = os.path.join(adir, fn)
+                            break
+                if apath:
+                    print(f"[wxbot] send audio to {name}: {os.path.basename(apath)}")
+                    try:
+                        wx.send_file(name, apath)
+                        state.record_sent(name, f"[语音:{os.path.basename(apath)}]")
+                        sent_ok += 1
+                    except Exception as e:
+                        print(f"send audio error: {e}")
+                        send_failures += 1
+                else:
+                    print(f"[wxbot] audio not resolved: {astem}")
+                if i < len(sentences) - 1:
+                    time.sleep(random.uniform(sd[0], sd[1]))
+                continue
+            # [IMG:关键词] 标记：发图片而不是文字
+            im_m = re.match(r"^\[(?:IMG(?::([^\]]*))?\]$)", sent.strip())
+            if im_m:
+                img_path = (pick_image(cfg, (im_m.group(1) or "").strip())
+                            if cfg.get("images", {}).get("enabled", True) else None)
+                # AI 生成图（gen_ 前缀）不走行为节流：那是模型按请求专门生成的
+                generated = bool(img_path and os.path.basename(img_path).startswith("gen_"))
+                if not generated and not _roll(beh["image"]):
+                    print(f"[wxbot] image throttled ({beh['image']:.0%})")
+                    continue
+                if img_path:
+                    print(f"[wxbot] send image to {name}: {os.path.basename(img_path)}")
+                    try:
+                        wx.send_image(name, img_path)
+                        state.record_sent(name, f"[图片:{os.path.basename(img_path)}]")
+                        sent_ok += 1
+                    except Exception as e:
+                        print(f"send image error: {e}")
+                        send_failures += 1
+                if i < len(sentences) - 1:
+                    time.sleep(random.uniform(sd[0], sd[1]))
+                continue
+            # 第一句若以 @昵称 开头 → 真 @ 该群成员
+            if i == 0 and is_group:
+                at_m = re.match(r"^@([^\s，,]{1,20})[\s，,]+(.*)$", sent, re.S)
+                if at_m:
+                    at_name, body = at_m.group(1), at_m.group(2).strip()
+                    if body:
+                        if not _roll(beh["at"]):
+                            print(f"[wxbot] @ throttled ({beh['at']:.0%}): {at_name}")
+                            ok = wx.send_text(name, body)
+                        else:
+                            print(f"[wxbot] send with @: {at_name}")
+                            ok = wx.send_text_at(name, at_name, body)
+                        if ok:
+                            state.record_sent(name, sent)
+                            sent_ok += 1
+                        else:
+                            send_failures += 1
+                        if i < len(sentences) - 1:
+                            time.sleep(random.uniform(sd[0], sd[1]))
+                        continue
+            if wx.send_text(name, sent):
+                state.record_sent(name, sent)
+                sent_ok += 1
+            else:
+                print(f"[wxbot] send_text FAILED to {name}: {sent[:40]!r}")
+                send_failures += 1
+                break
+            if i < len(sentences) - 1:
+                time.sleep(random.uniform(sd[0], sd[1]))
+        except Exception as e:
+            import traceback
+            print(f"send sentence to {name} error:", e)
+            print(traceback.format_exc())
+            send_failures += 1
+            break
+    done = send_failures == 0 or sent_ok > 0
+    if done:
+        # 有句子成功发出即算这轮回复完成（含部分成功：避免下轮重复回复）
+        state.mark_replied(name, target_text)
+        state.mark_reply_ts(name)
+        state.mark_seen(name, last_fp)
+        # 记忆系统：每 N 轮做一次事实提取（workspace 隔离）
+        mem_cfg = cfg.get("memory") or {}
+        if mem_cfg.get("enabled", True) and wxbot_memory.should_extract(state, name, int(mem_cfg.get("every_n_replies", 5))):
+            _memory_extract(cfg, name, ctx_lines)
+        state.save()
+        if send_failures:
+            print(f"[wxbot] partial send to {name}: {sent_ok}/{len(sentences)} ok")
+    return done, sent_ok, len(sentences)
+
 
 if __name__ == "__main__":
     main()

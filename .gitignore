@@ -8,6 +8,8 @@ wxbot_state.json
 wxbot_config.json
 wxbot_test_config.json
 wxbot_test_state.json
+wxbot.pid
+wxbot_status.json
 
 # 对话级记忆 workspace（含聊天提炼内容，不入库）
 workspaces/

@@ -327,6 +327,87 @@ _LAST_OPENED = [None]  # [(nick_name, username)]
 _WECHAT_DB = [None]     # WeChatDB 单例（懒加载）
 
 
+_CONN_CACHE = {"conns": {}, "expire": 0.0}   # rel -> conn（TTL 复用）
+_CONN_TTL_S = 3.0
+
+
+def reset_conn_cache():
+    """关闭并清空连接缓存（DB 单例重建/不健康时调用，防止句柄泄漏）。"""
+    for c in _CONN_CACHE["conns"].values():
+        try:
+            c.close()
+        except Exception:
+            pass
+    _CONN_CACHE["conns"] = {}
+    _CONN_CACHE["expire"] = 0.0
+
+
+class _SharedConn:
+    """连接代理：拦截 close()（wechatauto 的 get_messages 用完会 close，
+    但我们要跨调用复用）；真正关闭由 reset_conn_cache 负责。"""
+    def __init__(self, conn):
+        self._conn = conn
+    def close(self):
+        pass
+    def __getattr__(self, attr):
+        return getattr(self._conn, attr)
+
+
+def _patch_msg_conn_cached():
+    """消息库连接复用补丁。原版 _msg_conn 每次调用：打开全部分片库逐个查
+    sqlite_master + _open 做 mtime/WAL 检查 + 新建 sqlite 连接（实测 30 会话
+    ~600ms/轮，是 poll 的最大成本）。本补丁：
+    - 分片定位缓存：username → 分片 rel（消息按会话固定分片，命中只开 1 个库）
+    - 连接 TTL 复用（3s，对齐 poll 间隔）：同轮 30 会话共享少数几个分片连接，
+      到期重开保证能看到微信新写入（_open 的 WAL 增量在重开时合并）
+    - close 代理：兼容 wechatauto get_messages 的 finally close 语义
+    表不在缓存分片（重排/脏）时自动回退全扫刷新缓存。"""
+    try:
+        from wechatauto.db import WeChatDB as _WDB, _md5_hex
+    except ImportError:
+        return
+    shard_cache = {}
+
+    def _get_shared_conn(self, rel):
+        now = time.time()
+        if now > _CONN_CACHE["expire"]:
+            reset_conn_cache()
+            _CONN_CACHE["expire"] = now + _CONN_TTL_S
+        conn = _CONN_CACHE["conns"].get(rel)
+        if conn is None:
+            conn = _SharedConn(self._open(rel))
+            _CONN_CACHE["conns"][rel] = conn
+        return conn
+
+    def _msg_conn_cached(self, user):
+        target = "Msg_" + _md5_hex(user.encode())
+        # 最多两轮：第 1 轮用缓存分片；失败/表不在 → 清缓存后第 2 轮全扫
+        for attempt in range(2):
+            cached_rel = shard_cache.get(user)
+            rels = [cached_rel] if cached_rel else self._message_dbs()
+            for r in rels:
+                try:
+                    conn = _get_shared_conn(self, r)
+                    row = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                        (target,)).fetchone()
+                except Exception:
+                    if cached_rel:          # 缓存连接坏 → 重置本轮冷路径
+                        shard_cache.pop(user, None)
+                        reset_conn_cache()
+                        break               # 进第 2 轮全扫
+                    continue                # 全扫中的单库失败：试下一个
+                if row:
+                    shard_cache[user] = r
+                    return conn, target
+                if cached_rel:              # 缓存分片已无该表（重排）→ 重扫
+                    shard_cache.pop(user, None)
+                    break
+        return None
+
+    _WDB._msg_conn = _msg_conn_cached
+
+
 def _patch_friendly_content():
     """给 wechatauto 补上真正的 zstd 解压（猴子补丁，包本体不动）。
 
@@ -369,6 +450,7 @@ def _get_db():
     """懒加载 WeChatDB 单例（首次初始化约 6 秒）"""
     if _WECHAT_DB[0] is None:
         from wechatauto import WeChatDB
+        _patch_msg_conn_cached()
         _patch_friendly_content()
         _WECHAT_DB[0] = WeChatDB()
     return _WECHAT_DB[0]
@@ -455,6 +537,7 @@ def db_sessions(limit: int = 30) -> List[Dict]:
             "last": summary,
             "raw": summary,
             "unread": int(s.get("unread") or 0),
+            "last_ts": float(s.get("last_timestamp") or 0),
         })
     return out
 
@@ -473,6 +556,7 @@ def read_chat_db(username: str, limit: int = 20) -> List[Dict]:
         print(f"[wxmini2] read_chat_db error: {msg[:80]}")
         if "malformed" in msg or "unpack" in msg or "database is locked" in msg:
             _WECHAT_DB[0] = None   # 重置单例：下次调用重建连接（重新做 WAL 合并）
+            reset_conn_cache()
             print("[wxmini2] db unhealthy, singleton reset for rebuild")
         return []
     wxid = db.wxid
