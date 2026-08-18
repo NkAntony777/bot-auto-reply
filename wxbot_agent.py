@@ -36,7 +36,8 @@ DEFAULT_AGENT_CFG = {
     "max_tokens": 3600,
     "allow_send_message": True,
     "route_keywords": ["查", "谁", "最近", "排盘", "占卜", "算一卦", "塔罗", "黄历", "八字", "紫微",
-                        "六爻", "画一张", "画个", "画只", "画张", "画图", "生成一张", "生图"],
+                        "六爻", "画一张", "画个", "画只", "画张", "画图", "生成一张", "生图",
+                        "搜书", "找书", "求书", "电影", "影视", "追剧", "盲派", "知识库"],
 }
 
 # 点名+问句路由的问句信号（中文无空格，只能子串匹配）
@@ -184,6 +185,29 @@ def _mk_generate_image(ctx):
     return exec_fn
 
 
+def _mk_search_books(ctx):
+    def exec_fn(args):
+        import wxbot_hub
+        return wxbot_hub.search_books(ctx["cfg"], args.get("query") or "",
+                                      int(args.get("page", 1) or 1))
+    return exec_fn
+
+
+def _mk_search_videos(ctx):
+    def exec_fn(args):
+        import wxbot_hub
+        return wxbot_hub.search_videos(ctx["cfg"], args.get("query") or "")
+    return exec_fn
+
+
+def _mk_kb_mangpai(ctx):
+    def exec_fn(args):
+        import wxbot_hub
+        return wxbot_hub.kb_mangpai(ctx["cfg"], args.get("query") or "",
+                                    args.get("type") or "all")
+    return exec_fn
+
+
 def _mk_send_message(ctx):
     """预约发送：记录到 ctx['outbound']，由 poll 的稳定发送链路真正发出。"""
     def exec_fn(args):
@@ -241,6 +265,27 @@ _INTERNAL_TOOLS = [
                                 "description": "画面描述，中英文皆可，越具体越好（主体+风格+细节）"}},
       "required": ["prompt"]},
      _mk_generate_image),
+    ("search_books",
+     "搜书（Anna's Archive，经 antony.best 代理）：按书名/作者/ISBN 找电子书资源。",
+     {"type": "object",
+      "properties": {"query": {"type": "string", "description": "书名/作者/关键词"},
+                     "page": {"type": "integer", "description": "页码，默认 1"}},
+      "required": ["query"]},
+     _mk_search_books),
+    ("search_videos",
+     "搜影视资源（光影阁聚合源，经 antony.best 代理）：找电影/剧集的在线片源。",
+     {"type": "object",
+      "properties": {"query": {"type": "string", "description": "片名关键词"}},
+      "required": ["query"]},
+     _mk_search_videos),
+    ("kb_mangpai",
+     "盲派命理知识库检索（2067 条结构化条目，源自《盲派绝密》等）：查盲派技法/口诀/案例。"
+     "涉及盲派八字理论问题时先用它查证再回答。",
+     {"type": "object",
+      "properties": {"query": {"type": "string", "description": "检索问题或关键词，如：墓库 做功、禄神倒用"},
+                     "type": {"type": "string", "description": "限定条目类型：method/formula/table/concept/case/chapter，默认 all"}},
+      "required": ["query"]},
+     _mk_kb_mangpai),
 ]
 
 

@@ -176,6 +176,29 @@ def list_sessions(limit: int = 20) -> str:
     return json.dumps(rows, ensure_ascii=False, indent=1)
 
 
+# ================================================================ antony.best 扩展能力（wxbot_hub）
+
+@mcp.tool()
+def search_books(query: str, page: int = 1) -> str:
+    """搜书（Anna's Archive，经 antony.best 代理）：按书名/作者/ISBN 找电子书资源。"""
+    import wxbot_hub
+    return _trunc(wxbot_hub.search_books(wxbot.load_config(), query, page))
+
+
+@mcp.tool()
+def search_videos(query: str) -> str:
+    """搜影视资源（光影阁聚合源，经 antony.best 代理；需配置 hub.cine_gate_answer）。"""
+    import wxbot_hub
+    return _trunc(wxbot_hub.search_videos(wxbot.load_config(), query))
+
+
+@mcp.tool()
+def kb_mangpai(query: str, type: str = "all") -> str:
+    """盲派命理知识库检索（2067 条结构化条目）：查盲派技法/口诀/案例，含质量与来源标注。"""
+    import wxbot_hub
+    return _trunc(wxbot_hub.kb_mangpai(wxbot.load_config(), query, type))
+
+
 # ================================================================ 预算类（需 run_id）
 
 @mcp.tool()

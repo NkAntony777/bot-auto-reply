@@ -218,7 +218,15 @@
       "画张",
       "画图",
       "生成一张",
-      "生图"
+      "生图",
+      "搜书",
+      "找书",
+      "求书",
+      "电影",
+      "影视",
+      "追剧",
+      "盲派",
+      "知识库"
     ],
     "max_tokens": 3600,
     "engine": "builtin"
@@ -238,5 +246,12 @@
     "port": 8766,
     "run_ttl_s": 1800,
     "direct_send_gap_s": 60
+  },
+  "hub": {
+    "enabled": true,
+    "base_url": "https://antony.best",
+    "cine_gate_answer": "",
+    "mangpai_ttl_s": 604800,
+    "timeout_s": 20
   }
 }

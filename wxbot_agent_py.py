@@ -71,7 +71,23 @@ def _generate_image(rc: RunContext[Deps], prompt: str) -> str:
     return core._mk_generate_image(rc.deps.ctx)({"prompt": prompt})
 
 
-_INTERNAL_FNS = [_q_history, _q_member, _q_stats, _send_message, _generate_image]
+def _search_books(rc: RunContext[Deps], query: str, page: int = 1) -> str:
+    """搜书（Anna's Archive，经 antony.best 代理）：按书名/作者/ISBN 找电子书资源。"""
+    return core._mk_search_books(rc.deps.ctx)({"query": query, "page": page})
+
+
+def _search_videos(rc: RunContext[Deps], query: str) -> str:
+    """搜影视资源（光影阁聚合源，经 antony.best 代理）：找电影/剧集的在线片源。"""
+    return core._mk_search_videos(rc.deps.ctx)({"query": query})
+
+
+def _kb_mangpai(rc: RunContext[Deps], query: str, type: str = "all") -> str:
+    """盲派命理知识库检索（2067 条结构化条目，源自《盲派绝密》等）：查盲派技法/口诀/案例。涉及盲派八字理论问题时先用它查证再回答。"""
+    return core._mk_kb_mangpai(rc.deps.ctx)({"query": query, "type": type})
+
+
+_INTERNAL_FNS = [_q_history, _q_member, _q_stats, _send_message, _generate_image,
+                 _search_books, _search_videos, _kb_mangpai]
 
 
 def _budgeted(fn):

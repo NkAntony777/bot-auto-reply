@@ -49,6 +49,7 @@
 | `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
 | `wxbot_genimg.py` | **StepFun 文生图**（step_plan 套餐内，与 LLM 同 key 同域名）：`step-image-edit-2`，b64_json 落盘 `wxbot_images/generated/`，同 prompt 同 seed 一天内可复现，目录自动清理 |
 | `wxbot_mcp.py` | **MCP server（阶段 B）**：bot 能力标准化暴露——run 生命周期（begin/end_run，预算挂 run）、只读查询、send_message 预约/生图/antony_call（预算强制）、操作员直发（限速）；streamable-http 127.0.0.1:8766，任何 MCP 客户端可驱动同一身体 |
+| `wxbot_hub.py` | **antony.best 站点扩展能力**（网关外三数据源）：搜书（/api/annas 代理）、搜影视（/api/cine，PrivateGate 密语换 token）、**盲派知识库**（静态 2067 条 JSON，检索算法移植自站方 search.ts：字段打分+同义扩展+余弦语义+类型/质量权重，上下文格式同站方 buildAgentContext；磁盘缓存 7 天） |
 | `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
 | `wxapi.py` | **操作 API 层**（2026-08-18）：固定坐标快路径 open_chat（DB 行号+标题模板验证，OCR 退兜底）、剪贴板发图/发文件（CF_DIB/CF_HDROP）、HTTP API（127.0.0.1+token+单飞锁）、CLI 直调；详见 `docs/WXAPI.md` |
 | `wechatauto`（venv 包） | 微信 4.x 解密库：进程内存提取 SQLCipher key、库解密、WAL 增量合并、消息/会话查询 |
@@ -169,6 +170,9 @@ generate_image 走 StepFun 同 key 生图（`wxbot_genimg`），回复带 `[IMG:
 - `imagegen.*`：StepFun 文生图——`enabled`、`model`（step-image-edit-2）、
   `steps`/`cfg_scale`、`max_side`（发送前缩边）、`keep_files`（generated/ 保留张数）
 - `gateway.*`：antony.best 工具网关（入口/token 文件/超时/每消息最多注入工具数）
+- `hub.*`：antony.best 扩展能力——`cine_gate_answer`（影视搜索 PrivateGate 密语，
+  **站主本人填，空=影视搜索优雅禁用**）、`mangpai_ttl_s`（盲派库缓存天数）、
+  `cine_sources`（聚合源列表，默认与站方一致）
 - `mcp.*`：MCP server（`python wxbot_mcp.py` 起，127.0.0.1:8766/mcp）——
   `run_ttl_s`（run 会话回收）、`direct_send_gap_s`（操作员直发限速）。
   ZCode 接入：用户级 mcp 设置 `{"mcpServers": {"wxbot": {"type": "http",
