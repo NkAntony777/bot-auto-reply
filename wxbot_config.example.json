@@ -269,6 +269,15 @@
     "timeout_s": 120,
     "keep_files": 40,
     "max_chars": 200,
-    "pitch_target_hz": 218.0
+    "pitch_target_hz": 218.0,
+    "fallback": {
+      "enabled": true,
+      "model": "speech-2.8-hd",
+      "voice": "male-qn-qingse",
+      "pitch": 6,
+      "api_key_env": "WXBOT_LLM_KEY",
+      "base_url": "https://api.minimaxi.com",
+      "timeout_s": 60
+    }
   }
 }

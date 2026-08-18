@@ -31,6 +31,17 @@ DEFAULTS = {
     "keep_files": 40,
     "max_chars": 200,          # 单条语音文本上限（太长发不出去也没人听）
     "pitch_target_hz": 218.0,  # 合成后实测基频低于此值则数字升调到目标（0=关闭）
+    # fallback：StepFun TTS 挂了走 MiniMax t2a_v2（原生 pitch 升调，时长不变；
+    # 实测 male-qn-qingse: pitch0=167Hz / pitch6=216Hz / pitch12=279Hz）
+    "fallback": {
+        "enabled": True,
+        "model": "speech-2.8-hd",
+        "voice": "male-qn-qingse",
+        "pitch": 6,
+        "api_key_env": "WXBOT_LLM_KEY",
+        "base_url": "https://api.minimaxi.com",
+        "timeout_s": 60,
+    },
 }
 
 
@@ -99,21 +110,8 @@ def _ensure_pitch(pcm: bytes, target_hz: float):
     return buf.getvalue(), f0, ratio
 
 
-def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
-    """合成一条语音并落盘 wxbot_images/audio/gen_a_<hash>.wav。
-    合成用 wav（可测基频），实测低于 pitch_target_hz 时数字升调到目标，
-    保证正太少年音寄存器稳定。返回 (绝对路径, stem)；失败抛异常。"""
-    t = _tcfg(cfg)
-    if not t["enabled"]:
-        raise RuntimeError("tts disabled in config")
-    text = re.sub(r"\s+", " ", (text or "")).strip()[:t["max_chars"]]
-    if not text:
-        raise RuntimeError("text is empty")
-    # 括号动作描写（猫设回复常有）念出来很怪，剥掉
-    text = re.sub(r"[（(][^）)]{1,20}[）)]", "", text).strip()
-    if not text:
-        raise RuntimeError("剥掉动作描写后没有可念的文本")
-
+def _synthesize_stepfun(cfg, t, text, voice, instruction):
+    """主通道：StepFun stepaudio-2.5-tts（wav 输出，重采样升调兜底）。"""
     from curl_cffi import requests as creq
     key = cfg["llm"].get("api_key") or os.environ.get(cfg["llm"].get("api_key_env", ""))
     if not key:
@@ -136,7 +134,65 @@ def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
     content, f0, ratio = _ensure_pitch(r.content, float(t.get("pitch_target_hz", 0) or 0))
     if f0:
         note = f" -> pitch x{ratio:.2f} = {f0 * ratio:.0f}Hz" if ratio > 1.0 else " (in range)"
-        print(f"[tts] raw F0={f0:.0f}Hz{note}")
+        print(f"[tts:stepfun] F0={f0:.0f}Hz{note}")
+    return content
+
+
+def _synthesize_minimax(cfg, t, text):
+    """备通道：MiniMax t2a_v2（原生 pitch 升调，时长不变，音质比重采样好）。"""
+    fb = t.get("fallback") or {}
+    from curl_cffi import requests as creq
+    key = os.environ.get(fb.get("api_key_env", "WXBOT_LLM_KEY"), "")
+    if not key:
+        raise RuntimeError("no MiniMax api key")
+    r = creq.post(
+        f"{fb.get('base_url', 'https://api.minimaxi.com').rstrip('/')}/v1/t2a_v2",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={"model": fb.get("model", "speech-2.8-hd"), "text": text, "stream": False,
+              "voice_setting": {"voice_id": fb.get("voice", "male-qn-qingse"),
+                                "speed": 1.0, "vol": 1.0,
+                                "pitch": int(fb.get("pitch", 6))},
+              "audio_setting": {"sample_rate": 24000, "bitrate": 128000,
+                                "format": "wav", "channel": 1}},
+        impersonate="chrome", timeout=int(fb.get("timeout_s", 60)))
+    d = r.json()
+    audio_hex = (d.get("data") or {}).get("audio", "")
+    status = ((d.get("base_resp") or {}).get("status_code"))
+    if r.status_code != 200 or status not in (0, None) or not audio_hex:
+        raise RuntimeError(f"minimax tts failed: {str(d.get('base_resp', {}).get('status_msg', ''))[:100]}")
+    content = bytes.fromhex(audio_hex)
+    if len(content) < 1000:
+        raise RuntimeError("minimax tts 音频过短")
+    content, f0, ratio = _ensure_pitch(content, float(t.get("pitch_target_hz", 0) or 0))
+    if f0:
+        note = f" -> pitch x{ratio:.2f} = {f0 * ratio:.0f}Hz" if ratio > 1.0 else " (in range)"
+        print(f"[tts:minimax] F0={f0:.0f}Hz{note}")
+    return content
+
+
+def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
+    """合成一条语音并落盘 wxbot_images/audio/gen_a_<hash>.wav。
+    主备双通道：StepFun 挂了走 MiniMax（tts.fallback）；音高按 pitch_target_hz
+    实测锁定。返回 (绝对路径, stem)；失败抛异常。"""
+    t = _tcfg(cfg)
+    if not t["enabled"]:
+        raise RuntimeError("tts disabled in config")
+    text = re.sub(r"\s+", " ", (text or "")).strip()[:t["max_chars"]]
+    if not text:
+        raise RuntimeError("text is empty")
+    # 括号动作描写（猫设回复常有）念出来很怪，剥掉
+    text = re.sub(r"[（(][^）)]{1,20}[）)]", "", text).strip()
+    if not text:
+        raise RuntimeError("剥掉动作描写后没有可念的文本")
+
+    try:
+        content = _synthesize_stepfun(cfg, t, text, voice, instruction)
+    except Exception as e:
+        fb = t.get("fallback") or {}
+        if not fb.get("enabled", True):
+            raise
+        print(f"[tts] stepfun failed ({str(e)[:100]}), falling back to minimax")
+        content = _synthesize_minimax(cfg, t, text)
 
     d = audio_dir(cfg)
     os.makedirs(d, exist_ok=True)
