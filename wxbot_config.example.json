@@ -115,7 +115,7 @@
     "model": "YOUR_MODEL",
     "api_key_env": "YOUR_LLM_KEY_ENV",
     "temperature": 0.9,
-    "max_tokens": 2400,
+    "max_tokens": 8000,
     "context_window": 32000,
     "fallbacks": [
       {
@@ -228,7 +228,7 @@
       "盲派",
       "知识库"
     ],
-    "max_tokens": 3600,
+    "max_tokens": 8000,
     "engine": "builtin"
   },
   "imagegen": {

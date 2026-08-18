@@ -137,7 +137,7 @@ tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终�
 
 | 通道 | 模型 | 说明 |
 |---|---|---|
-| 主 | StepFun `step-3.7-flash` | `api.stepfun.com/step_plan/v1`；**推理型模型，思考也计 token，`max_tokens:2400` 才够复杂任务**（实测简单聊天思考约 200-400 tokens；复杂推理任务思考 1200+ tokens，900 上限会被截断；400 连正文都没有）；thinking 无法关闭（官方只提供 effort 档位且实测无效，全系列都思考） |
+| 主 | StepFun `step-3.7-flash` | `api.stepfun.com/step_plan/v1`；**推理型模型，思考也计 token，`max_tokens` 是天花板不是消耗量**（2026-08-18 起快慢路径统一 8000；历史实测：400 连正文都没有、900 截断、2400 偶发思考烧完空响应、3600 覆盖大部分 agent 轮）；thinking 无法关闭（官方只提供 effort 档位且实测无效，全系列都思考） |
 | 备 | MiniMax `minimax-m3` | 主通道故障自动接管（实测 401 → 1.6s fallback）；`thinking:{"type":"disabled"}` 生效 |
 
 换主模型：改 `llm.model`（`step-3.5-flash` 思考更短更快、稍直白）。key 支持内联 `llm.api_key`
