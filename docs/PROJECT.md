@@ -43,7 +43,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `wxbot.py` | 主守护：DB 驱动轮询、回复策略（冷却/免打扰/@门控/unlimited 群）、人格注入、分句发送、LLM fallback 与全局退避、日志 Tee |
+| `wxbot.py` | 主守护：DB 驱动轮询、回复策略（冷却/免打扰/@门控/unlimited 群）、人格注入、分句发送、LLM fallback 与全局退避、日志 Tee、**单实例守卫（启动清理旧进程+pid 文件）、每轮 poll 写心跳 `wxbot_status.json`** |
+| `wxbot_dashboard.py` | **本地 Web 看台**（2026-08-18）：127.0.0.1:8788，纯标准库。卡片式状态（运行/心跳停滞/已停止、pid、运行时长、LLM 退避、模型、本轮会话数）+ 日志尾自动刷新。数据全读文件（pid/心跳/state/log），bot 挂了也能显示"已停止"；配置敏感字段（key/token）不下发。自带单实例守卫，wxbot 启动时按 `dashboard.enabled` 自动拉起（端口被占则不重复起），也可独立 `python wxbot_dashboard.py` 运行 |
 | `wxbot_agent.py` | **agent 层路由与 builtin 引擎**：混合路由（快/慢双路径，快路径永远不进框架）、手写 tools 循环（builtin 引擎，保底可回滚）、内部工具 5 个（查群史/成员/统计/预约发送/AI 画图）+ antony.best 网关工具注入、**收口层 finalize_reply（双引擎共用：outbound 预约/[IMG:] 兜底/截断）** |
 | `wxbot_agent_py.py` | **pydantic 引擎（阶段 A，当前默认）**：PydanticAI v2——typed 工具校验、FallbackModel（StepFun→MiniMax 零手写）、output validator+retries 治 StepFun 空响应、UsageLimits 兜底；预算回填在 `_budgeted` 包装层（先于框架触发）。`agent.engine` 一行切回 builtin |
 | `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
@@ -51,7 +52,7 @@
 | `wxbot_tts.py` | **StepFun 语音合成**（step_plan 套餐内，与 LLM/生图同 key）：`stepaudio-2.5-tts`，阿廖沙人设=**男生正太少年音**（vibrant-youth+instruction），括号动作描写自动剥除，mp3 落盘 `wxbot_images/audio/`；PC 微信无原生语音气泡，经 `wxmini2.send_file`（CF_HDROP 剪贴板）以可内联播放的文件卡片发出 |
 | `wxbot_mcp.py` | **MCP server（阶段 B）**：bot 能力标准化暴露——run 生命周期（begin/end_run，预算挂 run）、只读查询、send_message 预约/生图/antony_call（预算强制）、操作员直发（限速）；streamable-http 127.0.0.1:8766，任何 MCP 客户端可驱动同一身体 |
 | `wxbot_hub.py` | **antony.best 站点扩展能力**（网关外数据源）：搜书（/api/annas）、搜影视（/api/cine，PrivateGate 密语换 token，7h 缓存）、**盲派知识库**（静态 2067 条 JSON，检索算法移植自站方 search.ts，磁盘缓存 7 天）、**联网搜索**（/api/anysearch 全网搜 + 网页正文抓取，复用同一 gate token） |
-| `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
+| `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁**、**send_file/send_image 草稿残片识别清理（own_fragments）** |
 | `wxapi.py` | **操作 API 层**（2026-08-18）：固定坐标快路径 open_chat（DB 行号+标题模板验证，OCR 退兜底）、剪贴板发图/发文件（CF_DIB/CF_HDROP）、HTTP API（127.0.0.1+token+单飞锁）、CLI 直调；详见 `docs/WXAPI.md` |
 | `wechatauto`（venv 包） | 微信 4.x 解密库：进程内存提取 SQLCipher key、库解密、WAL 增量合并、消息/会话查询 |
 | `personas/*.md` | 人格定义（当前主力 `neko_cow.md`＝阿廖沙） |
@@ -70,6 +71,7 @@
 | PrintWindow(pw_shot) 截图 | 对输入框等独立渲染层是**盲区**（截出空白），验证全错 | 验证类截图一律 **ImageGrab（屏幕截取）**；pw_shot 仅用于调试 |
 | OCR 文字匹配做发送验证 | 小窗口误字率高（`叫→啪`、`廖→膝`），一半字读错 | **像素判粘贴**（暗像素增量，阈值随文本长度缩放）+ **DB 精确文本匹配判送达**（零 OCR 依赖） |
 | 不检查 send_text 返回值 | 谎报成功，state 记假账 | poll 检查返回值；部分成功也算完成（防重复回复） |
+| 发文件/发图遇输入框草稿一律中止；且调用方不看返回值 | 开窗口失控时文本残片（如"就念一"的"一"）残留 → 音频被草稿保护拦下；但 `_send_reply` 不看 `send_file` 返回值照记 `sent_ok`，整轮误标已回复，语音静默丢失（2026-08-18 实测） | `send_file/send_image(own_fragments=本批句子)`：草稿是自家残片（⊆某句且 ≤30 字）→ `_clear_input_box` 清掉重发；否则当真人草稿保留放弃。`_send_reply` 检查返回值，AUDIO/IMG 失败计 `critical_fail`，整轮**不标已回复**下轮重试 |
 | wechatauto 读长/多行消息得 `[文本]` 占位符 | 微信 4.x 会把长/多行文本、表情 XML 的 `message_content` **zstd 压缩**存储；`_extract_text_from_blob` 只是跳头找明文的启发式，压实的 blob 解不出 → 读不到内容、发送确认误报失败 | wxmini2 猴子补丁 `_friendly_content`：文本类先真解压（`zstandard` 包）；表情/图片保持占位符语义 |
 | 停靠虚拟屏后侧边栏定位偶发 miss | 有新消息的会话顶到列表第一行，固定 `LIST_Y1=0.10` 上边距在小窗口（约 1000px 高）把首行群名切掉，OCR 只看到第二行预览 | `_find_sidebar_row` 常规裁剪 miss 后用 `Y1=0.02` 扩展裁剪再扫一遍 |
 
@@ -97,6 +99,12 @@
    每次截图判读前 `_ensure_fg` 确认微信在前台。
 9. **群消息格式**：发送者非自己时 content 带 `wxid_xxx:\n` 前缀；自己的消息干净无前缀。
 10. **OCR 可用窗口下限**：实测 1000px 宽（760px 时一半字读错）；验证逻辑不得依赖 OCR 文字精确性。
+11. **venv python 是壳，一个逻辑进程两个 pid**（2026-08-18 实测）：`.venv/Scripts/python.exe`
+    会派生 base 解释器（如 `D:\kaggle\.uvpython\...\python.exe`）子进程干真活——
+    任务管理器/CIM 里看到"两个 wxbot.py python"**不是多开**，是同一个 daemon。
+    清进程要按命令行匹配（两个 pid 都会匹配上），别按解释器路径。
+12. **`os.kill(pid, 0)` 在 Windows 不是存活检查**：直接抛 `OSError [WinError 87]`。
+    进程存活探测用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`（见 wxbot_dashboard `_pid_alive`）。
 
 ## 5. 运行手册
 
@@ -106,6 +114,16 @@ cd bot-auto-reply
 .venv/Scripts/python.exe wxbot.py --once     # 跑一轮就退出（调试用）
 tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终端+文件）
 ```
+
+**单实例**：wxbot 启动即清场——按命令行杀掉所有其他 `wxbot.py` 进程
+（含别的解释器路径起的老实例，排除自身祖先链防误杀宿主），随后写 `wxbot.pid`。
+重复启动安全：后启动的赢，先启动的被杀。**多开竞争（双发/状态打架）已从机制上杜绝。**
+
+**本地看台**：浏览器开 `http://127.0.0.1:8788`——状态卡片（运行/心跳停滞/已停止、
+LLM 退避、模型、会话数）+ 日志尾 3 秒自动刷新。wxbot 启动时自动拉起
+（`dashboard.enabled`，端口被占则不重复起）；bot 挂了看台仍在（数据全读文件），
+会显示"已停止"。也可独立跑：`.venv/Scripts/python.exe wxbot_dashboard.py --port 8788`。
+判定逻辑：pid 死=已停止；pid 活但心跳超 `max(6×poll间隔, 120s)`=心跳停滞（卡死告警）。
 
 前置条件：
 - 微信 PC 4.x 已登录且主窗口存在（daemon 会自动停靠，见下方"虚拟显示器"）
@@ -179,6 +197,8 @@ generate_image 走 StepFun 同 key 生图（`wxbot_genimg`），回复带 `[IMG:
   ZCode 接入：用户级 mcp 设置 `{"mcpServers": {"wxbot": {"type": "http",
   "url": "http://127.0.0.1:8766/mcp"}}}`
 - `state_file`：状态持久化（seen 指纹 / replied / sent）
+- `dashboard.*`：本地 Web 看台——`enabled`（默认 true，wxbot 启动时自动拉起）、
+  `port`（默认 8788，绑定 127.0.0.1）。纯只读监测；改配置请用 `wxbot-gui` 控制台（7931）
 
 ## 8. 已知限制
 

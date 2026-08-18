@@ -32,6 +32,8 @@
 - **上下文按需读取 + 自动压缩**：只追溯要回复的那个窗口所需的历史条数；超预算按词元压缩（截断旧消息 → 丢最旧）
 - **多通道 LLM fallback + 全局退避**：主模型挂了逐个试备用通道；全挂进入退避、**不丢消息**，网络恢复自动重试
 - **UIA 自愈**：微信 UIA 树挂死时自动重启微信进程恢复
+- **单实例守卫**：启动即清理所有旧 `wxbot.py` 进程（含其他解释器起的老实例），多开竞争从机制上杜绝
+- **本地监测看台**：`http://127.0.0.1:8788` 只读看台——运行状态/心跳/LLM 退避/日志尾实时刷新，bot 挂了也能看到"已停止"；随守护进程自动拉起
 - **Web 控制台**：改配置、看状态、看日志、管理人格/贴纸/行为旋钮，暗夜/白天双主题
 
 ---
@@ -39,7 +41,8 @@
 ## 架构
 
 ```
-wxbot.py        主守护进程：DB 驱动轮询 / 回复策略 / 人格注入 / 能力分发 / 退避重试 / 日志 Tee
+wxbot.py        主守护进程：DB 驱动轮询 / 回复策略 / 人格注入 / 能力分发 / 退避重试 / 单实例守卫 / 日志 Tee
+wxbot_dashboard.py 本地只读看台（127.0.0.1:8788）：状态卡片 + 日志尾，读文件驱动，bot 挂了也可观测
 wxmini2.py      视觉自动化库：ImageGrab+RapidOCR / 侧边栏定位点击 / 发送验证链 / 渲染三级自愈 / 微信重启
 wxmini.py       旧版 UIA 库（保留兼容）
 wxbot_files.py  文件消息读取：定位微信文件存储 + 按类型解析（docx/pdf/xlsx/xls/md/txt）
@@ -84,8 +87,14 @@ cp wxbot_config.example.json wxbot_config.json
 ### 3. 运行
 
 ```bash
-python -X utf8 wxbot.py          # 常驻
+python -X utf8 wxbot.py          # 常驻（启动自动清理旧实例，重复启动安全）
 python -X utf8 wxbot.py --once   # 只跑一轮，调试用
+```
+
+本地看台（只读监测，随 wxbot 自动拉起；也可独立跑 `python wxbot_dashboard.py`）：
+
+```
+http://127.0.0.1:8788            # 状态卡片 + 日志尾实时刷新
 ```
 
 Web 控制台（可选，改配置/看日志/管人格贴纸）：
@@ -115,6 +124,7 @@ npm start        # http://127.0.0.1:7931
 | `reply.target_matcher` | 按群指定「对线目标」（`contains_all` 关键词全命中才算），目标发言强制反击不许 SKIP |
 | `context.compression` | 上下文压缩：按百分比或词元预算，两阶段（截断→丢最旧） |
 | `memory` | 记忆系统：`every_n_replies` 每 N 轮提取一次事实 |
+| `dashboard` | 本地看台：`enabled` / `port`（默认 8788），wxbot 启动时自动拉起 |
 | `images` / `stickers` / `files` | 图片库 / 贴纸目录 / 文件解析上限 |
 
 **API key 一律走环境变量**（`api_key_env` 指定的名字），或写入 `~/.openclaw/openclaw.json` 的 `env` 段，不落配置文件。
@@ -133,6 +143,7 @@ npm start        # http://127.0.0.1:7931
 | `[IMG]` / `[IMG:关键词]` | 发图（关键词匹配图片库文件名） |
 | `[EMOJI:表情名]` | 发微信表情（如 `旺柴` / `捂脸`） |
 | `[STICKER:编号或关键词]` | 发收藏贴纸 |
+| `[AUDIO:文件标记]` | 发语音（先经 speak 工具 TTS 合成，以可内联播放的文件卡片发出） |
 
 ---
 

@@ -176,6 +176,10 @@
     "daily_chars": 800
   },
   "state_file": "YOUR_ABS_PATH/wxbot_state.json",
+  "dashboard": {
+    "enabled": true,
+    "port": 8788
+  },
   "own_nicknames": [
     "YOUR_WECHAT_NICKNAME"
   ],
