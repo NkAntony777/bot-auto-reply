@@ -38,7 +38,8 @@ DEFAULT_AGENT_CFG = {
     "route_keywords": ["查", "谁", "最近", "排盘", "占卜", "算一卦", "塔罗", "黄历", "八字", "紫微",
                         "六爻", "画一张", "画个", "画只", "画张", "画图", "生成一张", "生图",
                         "搜书", "找书", "求书", "电影", "影视", "追剧", "盲派", "知识库",
-                        "搜一下", "搜搜", "搜索", "最新", "新闻", "热搜", "发布"],
+                        "搜一下", "搜搜", "搜索", "最新", "新闻", "热搜", "发布",
+                        "语音", "说一句", "说句话", "说两句", "念出来", "念一下"],
 }
 
 # 点名+问句路由的问句信号（中文无空格，只能子串匹配）
@@ -224,6 +225,28 @@ def _mk_web_extract(ctx):
     return exec_fn
 
 
+def _mk_speak(ctx):
+    def exec_fn(args):
+        text = (args.get("text") or "").strip()
+        if not text:
+            return "text 不能为空。"
+        tcfg = ctx["cfg"].get("tts") or {}
+        if not tcfg.get("enabled", True):
+            return "语音功能当前已关闭，请自然告知用户。"
+        import wxbot_tts
+        try:
+            path, stem = wxbot_tts.synthesize(ctx["cfg"], text)
+        except Exception as e:
+            return f"语音合成失败：{str(e)[:120]}。请自然告知用户这会儿说不了，改用文字。"
+        import os
+        print(f"[agent] audio synthesized: {os.path.basename(path)}")
+        ctx["audio_stem"] = stem   # harness 兜底：确保最终回复带 [AUDIO:] 标记
+        return (f"语音已合成成功（这是事实，禁止说失败）。最终回复第一行必须原样写 "
+                f"[AUDIO:{stem}]，后面可以不再写字或只写一句收尾。语音会自动发出，"
+                "不要复述语音内容。")
+    return exec_fn
+
+
 def _mk_send_message(ctx):
     """预约发送：记录到 ctx['outbound']，由 poll 的稳定发送链路真正发出。"""
     def exec_fn(args):
@@ -316,6 +339,14 @@ _INTERNAL_TOOLS = [
       "properties": {"url": {"type": "string", "description": "http(s) 链接"}},
       "required": ["url"]},
      _mk_web_extract),
+    ("speak",
+     "用语音说一句话（TTS 合成后作为音频发到当前会话）。"
+     "人设事实：你的声音就是男生正太少年音，会说话是既定设定——被要求发语音/打招呼/念东西时"
+     "必须直接用本工具，绝不要以'猫不会说话'为由拒绝或改口；text 就是要说的话本身。",
+     {"type": "object",
+      "properties": {"text": {"type": "string", "description": "要说的内容（别带括号动作描写，会被剥掉）"}},
+      "required": ["text"]},
+     _mk_speak),
 ]
 
 
@@ -464,33 +495,90 @@ def new_ctx(cfg, conversation, username, inbound, is_group):
     return {
         "cfg": cfg, "acfg": _acfg(cfg), "conversation": conversation,
         "username": username, "inbound": inbound, "is_group": is_group,
-        "outbound": None, "sent_count": 0, "img_stem": None,
+        "outbound": None, "sent_count": 0, "img_stem": None, "audio_stem": None,
         "tool_count": 0,
     }
 
 
-def _img_marker(ctx, text):
-    """图已生成但模型没写 [IMG:] 标记时由 harness 兜底补上（不赌模型听话）。"""
+_SPEAK_FAKE_RE = re.compile(r"^\[(?:speak|语音|SPEAK):([^\]]{2,200})\]\s*$", re.M)
+_AUDIO_ANY_RE = re.compile(r"^\[AUDIO:([^\]]{1,120})\]\s*$", re.M)
+
+
+def _speak_fallback(ctx, text):
+    """音频意图兜底（不赌模型调工具）：模型有时在文本里'演'标记而不是真调 speak——
+    a) [speak:文本] 伪标记 → 按该文本合成；
+    b) 凭空发明的 [AUDIO:名字]（真调工具时 stem 由 harness 补、不会到这）→
+       按回复里其余纯文本行合成。两种都把伪标记删掉，真标记由 _media_markers 补。"""
+    if ctx.get("audio_stem"):
+        return text
+    tcfg = ctx["cfg"].get("tts") or {}
+    if not tcfg.get("enabled", True):
+        return text
+    text = text or ""
+    m = _SPEAK_FAKE_RE.search(text)
+    fake_audio = None
+    if m:
+        spoken = m.group(1).strip()
+    else:
+        fake_audio = _AUDIO_ANY_RE.search(text)
+        if not fake_audio:
+            return text
+        stripped = _AUDIO_ANY_RE.sub("", text, count=1)
+        lines = [ln.strip() for ln in stripped.splitlines()
+                 if ln.strip() and not ln.strip().startswith("[")]
+        spoken = " ".join(lines)[:200]
+        if len(spoken) < 4:
+            return text
+    try:
+        import wxbot_tts
+        path, stem = wxbot_tts.synthesize(ctx["cfg"], spoken)
+        ctx["audio_stem"] = stem
+        print(f"[agent] speak fallback synthesized: {stem}")
+    except Exception as e:
+        print(f"[agent] speak fallback failed: {e}")
+        return text
+    if m:
+        return _SPEAK_FAKE_RE.sub("", text, count=1)
+    return _AUDIO_ANY_RE.sub("", text, count=1)
+
+
+def _media_markers(ctx, text):
+    """媒体标记兜底（不赌模型听话）：音频/图片已生成但最终回复没写对应标记时补上。
+    音频标记在前（poll 分支顺序处理）。"""
+    text = text or ""
+    stem = ctx.get("audio_stem")
+    if stem and f"[AUDIO:{stem}" not in text:
+        print(f"[agent] prepending [AUDIO:{stem}] (model omitted marker)")
+        text = f"[AUDIO:{stem}]\n{text}"
     stem = ctx.get("img_stem")
-    if stem and f"[IMG:{stem}" not in (text or ""):
+    if stem and f"[IMG:{stem}" not in text:
         print(f"[agent] prepending [IMG:{stem}] (model omitted marker)")
-        return f"[IMG:{stem}]\n{text or ''}"
-    return text or ""
+        text = f"[IMG:{stem}]\n{text}"
+    return text
+
+
+# 向后兼容（builtin 循环与外部引用仍在用）
+def _img_marker(ctx, text):
+    return _media_markers(ctx, text)
 
 
 def finalize_reply(ctx, final_text):
     """收口层（框架无关，builtin / pydantic 双引擎共用同一份语义）：
-    outbound 预约覆盖 → [IMG:] 兜底 → max_reply_chars 截断。"""
+    outbound 预约覆盖 → [speak:伪标记] 兜底合成 → [AUDIO:]/[IMG:] 兜底 → 截断。"""
     limit = int(ctx["cfg"]["reply"].get("max_reply_chars", 300))
+    if final_text is not None:
+        final_text = _speak_fallback(ctx, final_text)
     if ctx["outbound"] is not None:
         if final_text and final_text != ctx["outbound"]:
             print(f"[agent] outbound overrides final text "
                   f"({len(ctx['outbound'])} vs {len(final_text)} chars)")
-        return _img_marker(ctx, ctx["outbound"])
+        return _media_markers(ctx, ctx["outbound"])
     if final_text is None:
-        # 跑完轮数仍无文本：有生成图就发图，否则按跳过处理（不触发 poll 退避）
-        return _img_marker(ctx, "") if ctx.get("img_stem") else "[SKIP]"
-    return _img_marker(ctx, final_text)[:limit] or None
+        # 跑完轮数仍无文本：有生成媒体就发媒体，否则按跳过处理（不触发 poll 退避）
+        if ctx.get("img_stem") or ctx.get("audio_stem"):
+            return _media_markers(ctx, "")
+        return "[SKIP]"
+    return _media_markers(ctx, final_text)[:limit] or None
 
 
 def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,

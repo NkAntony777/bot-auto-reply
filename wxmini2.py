@@ -1213,6 +1213,123 @@ def _wait_image_in_db(username: Optional[str], since_ts: float, timeout_s: float
     return False
 
 
+def _set_clipboard_files(paths) -> bool:
+    """文件列表 → 剪贴板 CF_HDROP（DROPFILES 头 + 双 \0 结尾的宽字符路径表）。"""
+    import struct
+    try:
+        import win32clipboard as wc
+        files = ("\0".join(paths) + "\0\0").encode("utf-16-le")
+        df = struct.pack("IiiII", 20, 0, 0, 0, 1)  # DROPFILES: pFiles=20, pt(0,0), fNC=0, fWide=1
+        wc.OpenClipboard()
+        try:
+            wc.EmptyClipboard()
+            wc.SetClipboardData(wc.CF_HDROP, df + files)
+        finally:
+            wc.CloseClipboard()
+        return True
+    except Exception as e:
+        print("[wxmini2] set clipboard files failed:", e)
+        return False
+
+
+def _wait_file_in_db(username: Optional[str], since_ts: float, timeout_s: float = 30.0) -> bool:
+    """轮询 DB 等 own 侧出现 since_ts 之后的文件消息（发送硬确认）。"""
+    if not username:
+        return False
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        try:
+            msgs = read_chat_db(username, limit=5)
+        except Exception:
+            msgs = []
+        for m in msgs:
+            if (m.get("side") == "own" and m.get("kind") == "file"
+                    and float(m.get("ts") or 0) >= since_ts - 2):
+                return True
+        time.sleep(1.5)
+    return False
+
+
+def send_file(contact: str, path: str) -> bool:
+    """发任意文件（CF_HDROP 剪贴板粘贴，与发图同一条稳定链）。
+    mp3/wav 等音频在微信里以可内联播放的文件卡片呈现——PC 端没有原生语音气泡，
+    这是 bot 发语音的实际形态。"""
+    if not os.path.exists(path):
+        print(f"[wxmini2] send_file: file not found {path}")
+        return False
+    if not wait_user_idle():
+        print("[wxmini2] user still active, sending anyway (timeout)")
+    hwnd = find_wechat()
+    park_wechat(hwnd)
+    prev_fg = C.windll.user32.GetForegroundWindow()
+    try:
+        return _send_file_core(hwnd, contact, path)
+    finally:
+        if prev_fg and prev_fg != hwnd:
+            try:
+                C.windll.user32.SetForegroundWindow(prev_fg)
+            except Exception:
+                pass
+
+
+def _send_file_core(hwnd: int, contact: str, path: str) -> bool:
+    import pyautogui
+    gap = time.time() - _last_send_ts[0]
+    if gap < _MIN_SEND_GAP_S:
+        time.sleep(_MIN_SEND_GAP_S - gap)
+    force_foreground(hwnd)
+    if not open_chat_by_click(hwnd, contact, timeout=6.0):
+        print(f"[wxmini2] open_chat failed: {contact}")
+        return False
+    time.sleep(0.3)
+    if not ensure_chat_rendered(hwnd):
+        print("[wxmini2] render dead, escalating to WeChat restart")
+        try:
+            hwnd = restart_wechat()
+            if not open_chat_by_click(hwnd, contact, timeout=6.0):
+                return False
+            if not ensure_chat_rendered(hwnd):
+                return False
+        except Exception as e:
+            print("[wxmini2] restart_wechat failed:", e)
+            return False
+    target_username = (_LAST_OPENED[0] or (None, None))[1]
+    l, t, r, b, w, h = get_window_rect(hwnd)
+    # 1. 点输入框并确认无残留草稿（防 Enter 误发旧内容）
+    force_foreground(hwnd)
+    in_x = l + int(w * 0.55)
+    in_y = t + int(h * 0.89)
+    pyautogui.click(in_x, in_y, duration=0.1)
+    time.sleep(0.25)
+    draft = _input_box_text_stripped(hwnd)
+    if draft:
+        print(f"[wxmini2] send_file abort: input has draft {draft[:20]!r}")
+        return False
+    # 2. 文件上剪贴板 → 粘贴（文件卡片预览约 1s）
+    if not _set_clipboard_files([os.path.abspath(path)]):
+        return False
+    pyautogui.hotkey('ctrl', 'v', interval=0.05)
+    time.sleep(1.2)
+    # 3. 发送：Enter，未确认再 Ctrl+Enter；DB 出现 own 文件消息才算成
+    t0 = time.time()
+    sent = False
+    for method in ('enter', 'ctrl_enter'):
+        if method == 'enter':
+            pyautogui.press('enter')
+        else:
+            pyautogui.hotkey('ctrl', 'enter')
+        time.sleep(1.0)
+        if _wait_file_in_db(target_username, t0, timeout_s=20.0):
+            sent = True
+            break
+        print(f"[wxmini2] send_file via {method} not confirmed, trying next")
+    if sent:
+        _last_send_ts[0] = time.time()
+    else:
+        print("[wxmini2] send_file not confirmed in DB")
+    return sent
+
+
 def send_image(contact: str, path: str) -> bool:
     """发图片：CF_DIB 上剪贴板 → 点输入框 → Ctrl+V → Enter → DB 确认图片消息。
     走剪贴板粘贴而不是「+」→文件对话框：对话框是独立渲染面，视觉定位易碎；

@@ -179,6 +179,20 @@
    "expect_tools": [
     "web_search"
    ]
+  },
+  {
+   "id": "route-voice",
+   "kind": "route",
+   "inbound": "【发送者昵称: 123】阿廖沙发个语音打个招呼呗",
+   "is_group": true,
+   "expect": "slow"
+  },
+  {
+   "id": "route-voice2",
+   "kind": "route",
+   "inbound": "【发送者昵称: 123】说句话听听",
+   "is_group": true,
+   "expect": "slow"
   }
  ]
 }

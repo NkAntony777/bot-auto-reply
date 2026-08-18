@@ -96,8 +96,14 @@ def _web_extract(rc: RunContext[Deps], url: str) -> str:
     return core._mk_web_extract(rc.deps.ctx)({"url": url})
 
 
+def _speak(rc: RunContext[Deps], text: str) -> str:
+    """用语音说一句话（TTS 合成后作为音频发到当前会话）。人设事实：你的声音就是男生正太少年音，会说话是既定设定——被要求发语音/打招呼/念东西时必须直接用本工具，绝不要以猫不会说话为由拒绝。"""
+    return core._mk_speak(rc.deps.ctx)({"text": text})
+
+
 _INTERNAL_FNS = [_q_history, _q_member, _q_stats, _send_message, _generate_image,
-                 _search_books, _search_videos, _kb_mangpai, _web_search, _web_extract]
+                 _search_books, _search_videos, _kb_mangpai, _web_search, _web_extract,
+                 _speak]
 
 
 def _budgeted(fn):

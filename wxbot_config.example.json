@@ -226,7 +226,13 @@
       "最新",
       "新闻",
       "热搜",
-      "发布"
+      "发布",
+      "语音",
+      "说一句",
+      "说句话",
+      "说两句",
+      "念出来",
+      "念一下"
     ],
     "max_tokens": 8000,
     "engine": "builtin"
@@ -253,5 +259,15 @@
     "cine_gate_answer": "",
     "mangpai_ttl_s": 604800,
     "timeout_s": 20
+  },
+  "tts": {
+    "enabled": true,
+    "model": "stepaudio-2.5-tts",
+    "voice": "vibrant-youth",
+    "instruction": "正太少年音，男孩，傲娇俏皮，语速正常",
+    "response_format": "mp3",
+    "timeout_s": 120,
+    "keep_files": 40,
+    "max_chars": 200
   }
 }

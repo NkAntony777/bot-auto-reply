@@ -213,6 +213,25 @@ def web_extract(url: str) -> str:
     return _trunc(wxbot_hub.web_extract(wxbot.load_config(), url))
 
 
+@mcp.tool()
+def speak(text: str) -> str:
+    """TTS 合成一段阿廖沙音色（正太少年音）的语音并发到会话（操作员直发，限速内）。"""
+    import wxbot_tts
+    cfg = wxbot.load_config()
+    try:
+        path, _stem = wxbot_tts.synthesize(cfg, text)
+    except Exception as e:
+        return f"合成失败：{e}"
+    import wxmini2 as wxm
+    name = "阿布菠萝"
+    for s in wxm.db_sessions(limit=30):
+        if "阿布菠萝" in s["name"]:
+            name = s["name"]
+            break
+    ok = wxm.send_file(name, path)
+    return "已发送语音（DB 确认）" if ok else "发送失败（见 wxmini2 日志）"
+
+
 # ================================================================ 预算类（需 run_id）
 
 @mcp.tool()

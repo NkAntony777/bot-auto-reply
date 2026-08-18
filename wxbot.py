@@ -658,6 +658,8 @@ def _build_system(cfg, conversation, inbound_text, is_group, pname, beh, ppath):
         "① 想 @ 群里的某个人（仅群聊）：把回复第一句以「@昵称 」（昵称+空格）开头；"
         "② 想发一张图片/表情包：单独占一行写 [IMG:关键词]，关键词可省略写成 [IMG] 随机挑；"
         "②b 想发微信自带表情：单独占一行写 [EMOJI:表情名]，如 [EMOJI:旺柴]、[EMOJI:捂脸]、[EMOJI:偷笑]、[EMOJI:鄙视]；"
+        "②c 想发一段语音（说句话）：先调用 speak 工具（用你的正太少年音合成），它会返回文件标记，"
+        "然后在回复里单独占一行写 [AUDIO:文件标记]——用法和 [IMG:] 一样；不要自己编 [speak:文本] 这种写法；"
         "③ 对方发来图片时你能看到图片内容描述；对方发来文件时你能看到文件内容，据此自然回应。"
     )
     if (cfg.get("search") or {}).get("enabled", False):
@@ -1202,6 +1204,32 @@ def poll_once(cfg, state, hwnd):
                             send_failures += 1
                     else:
                         print(f"[wxbot] sticker not resolved: {st_m.group(1)}")
+                    if i < len(sentences) - 1:
+                        time.sleep(random.uniform(sd[0], sd[1]))
+                    continue
+                # [AUDIO:stem] 标记：发语音（TTS 生成的 mp3 文件卡片）
+                au_m = re.match(r"^\[AUDIO(?::([^\]]*))?\]$", sent.strip())
+                if au_m:
+                    astem = (au_m.group(1) or "").strip()
+                    apath = None
+                    if astem:
+                        import wxbot_tts
+                        adir = wxbot_tts.audio_dir(cfg)
+                        for fn in os.listdir(adir) if os.path.isdir(adir) else []:
+                            if fn.startswith(astem) and fn.endswith(".mp3"):
+                                apath = os.path.join(adir, fn)
+                                break
+                    if apath:
+                        print(f"[wxbot] send audio to {name}: {os.path.basename(apath)}")
+                        try:
+                            wx.send_file(name, apath)
+                            state.record_sent(name, f"[语音:{os.path.basename(apath)}]")
+                            sent_ok += 1
+                        except Exception as e:
+                            print(f"send audio error: {e}")
+                            send_failures += 1
+                    else:
+                        print(f"[wxbot] audio not resolved: {astem}")
                     if i < len(sentences) - 1:
                         time.sleep(random.uniform(sd[0], sd[1]))
                     continue

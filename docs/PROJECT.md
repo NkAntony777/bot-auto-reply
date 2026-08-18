@@ -48,6 +48,7 @@
 | `wxbot_agent_py.py` | **pydantic 引擎（阶段 A，当前默认）**：PydanticAI v2——typed 工具校验、FallbackModel（StepFun→MiniMax 零手写）、output validator+retries 治 StepFun 空响应、UsageLimits 兜底；预算回填在 `_budgeted` 包装层（先于框架触发）。`agent.engine` 一行切回 builtin |
 | `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
 | `wxbot_genimg.py` | **StepFun 文生图**（step_plan 套餐内，与 LLM 同 key 同域名）：`step-image-edit-2`，b64_json 落盘 `wxbot_images/generated/`，同 prompt 同 seed 一天内可复现，目录自动清理 |
+| `wxbot_tts.py` | **StepFun 语音合成**（step_plan 套餐内，与 LLM/生图同 key）：`stepaudio-2.5-tts`，阿廖沙人设=**男生正太少年音**（vibrant-youth+instruction），括号动作描写自动剥除，mp3 落盘 `wxbot_images/audio/`；PC 微信无原生语音气泡，经 `wxmini2.send_file`（CF_HDROP 剪贴板）以可内联播放的文件卡片发出 |
 | `wxbot_mcp.py` | **MCP server（阶段 B）**：bot 能力标准化暴露——run 生命周期（begin/end_run，预算挂 run）、只读查询、send_message 预约/生图/antony_call（预算强制）、操作员直发（限速）；streamable-http 127.0.0.1:8766，任何 MCP 客户端可驱动同一身体 |
 | `wxbot_hub.py` | **antony.best 站点扩展能力**（网关外数据源）：搜书（/api/annas）、搜影视（/api/cine，PrivateGate 密语换 token，7h 缓存）、**盲派知识库**（静态 2067 条 JSON，检索算法移植自站方 search.ts，磁盘缓存 7 天）、**联网搜索**（/api/anysearch 全网搜 + 网页正文抓取，复用同一 gate token） |
 | `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
