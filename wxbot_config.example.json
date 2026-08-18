@@ -264,7 +264,7 @@
     "enabled": true,
     "model": "stepaudio-2.5-tts",
     "voice": "vibrant-youth",
-    "instruction": "正太少年音，男孩，傲娇俏皮，语速正常",
+    "instruction": "正太少年音，男孩，聪明帅气，从容自信，语速正常",
     "response_format": "mp3",
     "timeout_s": 120,
     "keep_files": 40,

@@ -21,10 +21,10 @@ import time
 DEFAULTS = {
     "enabled": True,
     "model": "stepaudio-2.5-tts",
-    # 阿廖沙人设：男生正太少年音（站主钦定）。vibrant-youth=元气青年，
-    # instruction 往正太方向压；备选 yuanqinansheng/qingniandaxuesheng。
+    # 阿廖沙人设：男生正太少年音（站主钦定），性格聪明帅气从容。vibrant-youth=
+    # 元气青年，instruction 往正太少年感+自信方向压；备选 yuanqinansheng。
     "voice": "vibrant-youth",
-    "instruction": "正太少年音，男孩，傲娇俏皮，语速正常",
+    "instruction": "正太少年音，男孩，聪明帅气，从容自信，语速正常",
     "response_format": "mp3",
     "timeout_s": 120,
     "keep_files": 40,
