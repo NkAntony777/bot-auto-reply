@@ -29,6 +29,7 @@ from wxbot_gateway import Gateway
 
 DEFAULT_AGENT_CFG = {
     "enabled": True,
+    "engine": "builtin",
     "max_rounds": 5,
     "tool_budget": 8,
     "result_max_chars": 2000,
@@ -383,17 +384,47 @@ def _llm_chat(cfg, messages, tools=None, max_tokens=None):
 
 # ================================================================ agent 循环（T2）
 
+def new_ctx(cfg, conversation, username, inbound, is_group):
+    """每 run 的可变状态（双引擎共用；pydantic 引擎装进 RunContext[Deps].ctx）。"""
+    return {
+        "cfg": cfg, "acfg": _acfg(cfg), "conversation": conversation,
+        "username": username, "inbound": inbound, "is_group": is_group,
+        "outbound": None, "sent_count": 0, "img_stem": None,
+        "tool_count": 0,
+    }
+
+
+def _img_marker(ctx, text):
+    """图已生成但模型没写 [IMG:] 标记时由 harness 兜底补上（不赌模型听话）。"""
+    stem = ctx.get("img_stem")
+    if stem and f"[IMG:{stem}" not in (text or ""):
+        print(f"[agent] prepending [IMG:{stem}] (model omitted marker)")
+        return f"[IMG:{stem}]\n{text or ''}"
+    return text or ""
+
+
+def finalize_reply(ctx, final_text):
+    """收口层（框架无关，builtin / pydantic 双引擎共用同一份语义）：
+    outbound 预约覆盖 → [IMG:] 兜底 → max_reply_chars 截断。"""
+    limit = int(ctx["cfg"]["reply"].get("max_reply_chars", 300))
+    if ctx["outbound"] is not None:
+        if final_text and final_text != ctx["outbound"]:
+            print(f"[agent] outbound overrides final text "
+                  f"({len(ctx['outbound'])} vs {len(final_text)} chars)")
+        return _img_marker(ctx, ctx["outbound"])
+    if final_text is None:
+        # 跑完轮数仍无文本：有生成图就发图，否则按跳过处理（不触发 poll 退避）
+        return _img_marker(ctx, "") if ctx.get("img_stem") else "[SKIP]"
+    return _img_marker(ctx, final_text)[:limit] or None
+
+
 def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
                 username=None, max_rounds=None, tool_budget=None):
     acfg = _acfg(cfg)
     max_rounds = int(max_rounds or acfg["max_rounds"])
     tool_budget = int(tool_budget or acfg["tool_budget"])
     result_max = int(acfg["result_max_chars"])
-    ctx = {
-        "cfg": cfg, "acfg": acfg, "conversation": conversation,
-        "username": username, "inbound": inbound, "is_group": is_group,
-        "outbound": None, "sent_count": 0, "img_stem": None,
-    }
+    ctx = new_ctx(cfg, conversation, username, inbound, is_group)
 
     system = wxbot.system_prompt_for(cfg, conversation, inbound, is_group)
     tools = build_toolset(cfg, ctx)
@@ -421,14 +452,6 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
     agent_max_tokens = int(acfg.get("max_tokens", 3600))
     final_text = None
     t0 = time.time()
-
-    def _with_img_marker(text):
-        """图已生成但模型没写 [IMG:] 标记时由 harness 兜底补上（不赌模型听话）。"""
-        stem = ctx.get("img_stem")
-        if stem and f"[IMG:{stem}" not in (text or ""):
-            print(f"[agent] prepending [IMG:{stem}] (model omitted marker)")
-            return f"[IMG:{stem}]\n{text or ''}"
-        return text
 
     for rnd in range(1, max_rounds + 1):
         # 最后一轮不再给工具，逼模型收口；预算耗尽同理
@@ -485,22 +508,10 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
         # 继续下一轮
 
     if final_text is None:
-        if ctx["outbound"] is not None:
-            print(f"[agent] no final text, using outbound ({len(ctx['outbound'])} chars)")
-            return _with_img_marker(ctx["outbound"])
-        print(f"[agent] rounds exhausted without final text ({time.time() - t0:.1f}s)")
-        return _with_img_marker("") if ctx.get("img_stem") else "[SKIP]"  # 有图无文也发图
-
-    if ctx["outbound"] is not None:
-        if final_text and final_text != ctx["outbound"]:
-            print(f"[agent] outbound overrides final text "
-                  f"({len(ctx['outbound'])} vs {len(final_text)} chars)")
-        return _with_img_marker(ctx["outbound"])
-
-    limit = int(cfg["reply"].get("max_reply_chars", 300))
+        if ctx["outbound"] is None and not ctx.get("img_stem"):
+            print(f"[agent] rounds exhausted without final text ({time.time() - t0:.1f}s)")
     print(f"[agent] done in {time.time() - t0:.1f}s, {tool_budget - budget} tool calls")
-    final_text = _with_img_marker(final_text)
-    return final_text[:limit] if final_text else None
+    return finalize_reply(ctx, final_text)
 
 
 # ================================================================ 混合路由（T3）
@@ -531,17 +542,40 @@ def _route_reason(cfg, inbound, is_group):
     return None
 
 
+def _engine_fn(cfg):
+    """慢路径引擎选择：agent.engine = "builtin"(默认) | "pydantic"。
+    返回 (agent_reply 函数, 引擎名)。pydantic 不可用时回 builtin。"""
+    engine = _acfg(cfg).get("engine", "builtin")
+    if engine == "pydantic":
+        try:
+            import wxbot_agent_py
+            return wxbot_agent_py.agent_reply, "pydantic"
+        except ImportError as e:
+            print(f"[agent] pydantic engine unavailable ({e}), using builtin")
+    return agent_reply, "builtin"
+
+
 def reply_dispatch(cfg, conversation, inbound, ctx_lines=None, is_group=True, username=None):
-    """poll 唯一入口：无信号走原 llm_reply（快路径），有信号走 agent_reply（慢路径）。"""
+    """poll 唯一入口：无信号走原 llm_reply（快路径，**永远不进框架**），
+    有信号走 agent_reply 慢路径（按 agent.engine 选 builtin/pydantic 双引擎）。"""
     reason = _route_reason(cfg, inbound, is_group)
     if not reason:
         return wxbot.llm_reply(cfg, conversation, inbound, context=ctx_lines, is_group=is_group)
-    print(f"[agent] slow path ({reason}) -> {conversation}")
+    fn, engine = _engine_fn(cfg)
+    print(f"[agent] slow path ({reason}, engine={engine}) -> {conversation}")
     try:
-        return agent_reply(cfg, conversation, inbound, ctx_lines=ctx_lines,
-                           is_group=is_group, username=username)
+        return fn(cfg, conversation, inbound, ctx_lines=ctx_lines,
+                  is_group=is_group, username=username)
     except Exception as e:
-        print(f"[agent] loop crashed, fallback to fast path: {e}")
+        if engine != "builtin":
+            print(f"[agent] {engine} engine crashed, retrying with builtin: {e}")
+            try:
+                return agent_reply(cfg, conversation, inbound, ctx_lines=ctx_lines,
+                                   is_group=is_group, username=username)
+            except Exception as e2:
+                print(f"[agent] builtin engine also crashed: {e2}")
+        else:
+            print(f"[agent] loop crashed, fallback to fast path: {e}")
         return wxbot.llm_reply(cfg, conversation, inbound, context=ctx_lines, is_group=is_group)
 
 

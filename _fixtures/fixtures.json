@@ -1,0 +1,22 @@
+{
+  "comment": "agent 回归语料（2026-08-18 固化）。kind=route 只验快/慢路由（零成本）；kind=full 走完整 agent 引擎（真实 LLM+工具）。scenario=gateway_down 的用例在重放时自动把网关指到不可达地址。",
+  "cases": [
+    {"id": "route-chitchat-1", "kind": "route", "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】喵喵喵", "is_group": true, "expect": "fast"},
+    {"id": "route-chitchat-2", "kind": "route", "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】哈哈哈哈哈笑死", "is_group": true, "expect": "fast"},
+    {"id": "route-chitchat-3", "kind": "route", "inbound": "【发送者昵称: 123】今天天气不错", "is_group": true, "expect": "fast"},
+    {"id": "route-history", "kind": "route", "inbound": "【发送者昵称: 123】52 最近都聊了什么", "is_group": true, "expect": "slow"},
+    {"id": "route-stats", "kind": "route", "inbound": "【发送者昵称: 123】群里最近一周谁最活跃", "is_group": true, "expect": "slow"},
+    {"id": "route-bazi", "kind": "route", "inbound": "【发送者昵称: 123】帮我排个八字：2024-06-15 14:30 女", "is_group": true, "expect": "slow"},
+    {"id": "route-tarot", "kind": "route", "inbound": "【发送者昵称: 123】塔罗测下明天运势", "is_group": true, "expect": "slow"},
+    {"id": "route-almanac", "kind": "route", "inbound": "【发送者昵称: 123】今天黄历宜什么", "is_group": true, "expect": "slow"},
+    {"id": "route-draw", "kind": "route", "inbound": "【发送者昵称: 123】阿廖沙画一张你在窗台晒太阳的图", "is_group": true, "expect": "slow"},
+    {"id": "route-mention-q", "kind": "route", "inbound": "【发送者昵称: 123】阿廖沙 你叫什么名字呀？", "is_group": true, "expect": "slow"},
+    {"id": "route-mention-noq", "kind": "route", "inbound": "【发送者昵称: 123】阿廖沙真可爱", "is_group": true, "expect": "fast"},
+    {"id": "route-liuyao", "kind": "route", "inbound": "【发送者昵称: 123】起个六爻看看这事成不成", "is_group": true, "expect": "slow"},
+
+    {"id": "full-bazi", "kind": "full", "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】帮我排个八字：2024-06-15 14:30 女", "is_group": true, "expect_tools": ["antony_bazi"]},
+    {"id": "full-tarot", "kind": "full", "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】塔罗帮我抽张牌测下明天运势", "is_group": true, "expect_tools": ["antony_tarot"]},
+    {"id": "full-history", "kind": "full", "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】52 最近都聊了什么", "is_group": true, "expect_tools": ["query_chat_history"]},
+    {"id": "full-gwdown-tarot", "kind": "full", "scenario": "gateway_down", "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】塔罗测下明天运势", "is_group": true, "expect": "no-crash"}
+  ]
+}

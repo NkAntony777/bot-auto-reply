@@ -1,7 +1,8 @@
 # 调研报告：agent 框架迁移方案（自研 harness → 成熟框架）
 
-> 调研日期：2026-08-18｜背景：Phase 1 自研 agent 循环已上线，但为长期演进考虑底层框架化
-> 结论先行：**分层演进——近期 PydanticAI v2 换脑、中期工具层 MCP 化、远期可选 Pi 双脑实验**。
+> 调研日期：2026-08-18｜评审修订：同日（外部 agent 交叉评审，5 条修正已吸收）
+> 背景：Phase 1 自研 agent 循环已上线，但为长期演进考虑底层框架化
+> 结论先行：**分层演进——近期 PydanticAI v2 换脑（仅慢路径）、中期工具层 MCP 化、远期可选 Pi 双脑实验**。
 > LangGraph 不推荐现阶段引入。
 
 ---
@@ -76,21 +77,57 @@
              └─ pi RPC 脑（spike 通过后，可选第二人格/生态实验）
 ```
 
-### 阶段 A：PydanticAI v2 换脑（1 晚，风险低）
-- 新建 `wxbot_agent_py.py`：`reply_dispatch` 同签名，内部用 PydanticAI Agent + OpenAIProvider(StepFun) + fallback 实例(MiniMax)
-- 现有工具函数直接注册；send_message 预约/预算语义在外层保留（框架 usage limit 只做兜底）
-- 配置 `agent.engine`，按会话灰度切换，wxbot_run.log 对比双引擎输出
-- 验收：A1-A7 场景重跑全过 + thinking 参数透传验证 + 快路径延迟无回归
+### 阶段 A：PydanticAI v2 换脑（**2-3 晚**，仅慢路径）—— ✅ 已完工 2026-08-18
+
+> 实际 1 晚完工（评审估 2-3 晚）：收口层重构后工具实现零改动复用是关键提速项。
+> 交付：`wxbot_agent_py.py`（当前默认引擎）+ `run_fixtures.py`（route 12/12，
+> full 双引擎 8/8 零 crash，塔罗 seed 跨引擎同牌验证确定性）+ 配置 `agent.engine`
+> 一行回滚。快路径未动。
+
+**范围铁律：快路径不进框架。** `reply_dispatch` 的快路径（单轮 `llm_reply`，
+承担 ~90% 群聊斗嘴）保持裸调用原样不动——换脑的只有 `agent_reply` 慢路径。
+路由判定逻辑（快/慢分流）也留在框架外共用，避免迁移顺手把快路径"框架化"
+引入延迟回归。
+
+慢路径里的非标语义在框架中的落点（评审确认的坑位清单）：
+
+| 现有语义 | PydanticAI 表达 | 风险 |
+|---|---|---|
+| 工具是 ctx 闭包（outbound/sent_count/img_stem 每 run 状态） | `RunContext[Deps]` 注入，Deps 每 run 新建 | 低，机械改写 |
+| send_message 预约发送 + outbound 覆盖 final_text + [IMG:] 兜底 | **留在框架外的收口层**（两个引擎共用同一份 `_finalize_reply`） | 中——收口层要做模块级重构共享 |
+| "最后一轮撤工具逼收口""预算耗尽回填提示" | UsageLimits 超限捕获后自己补一次无工具收口调用 | 中 |
+| StepFun 空响应（思考烧完 token） | output validator 抛 ModelRetry 接 retries（框架不自动做） | 中 |
+| fallback 链 | `FallbackModel`（好消息：不用手写） | 低 |
+| thinking 透传 | OpenAI provider `extra_body`（需实测） | 低 |
+
+- 配置 `agent.engine: "builtin" | "pydantic"`，按会话灰度切换
 - 回滚：开关拨回 `builtin`，一秒回滚
 
-### 阶段 B：工具层 MCP 化（1-2 晚）
+**阶段 A.5（并行做）：fixture 语料库。** 双引擎灰度期间把 wxbot_run.log 的
+输入（conversation/inbound/ctx_lines/is_group/username）+ 双路输出固化成
+fixture 集（目标 ≥20 条，覆盖：八字/塔罗/查群史/画图/网关挂/发送预算/空响应/
+快路径样例），落 `_fixtures/` + `run_fixtures.py` 重放脚本。以后每次框架升级
+重放一遍——顺手解决"无评测"痛点。
+
+### 阶段 B：工具层 MCP 化（1-2 晚，**先定 ctx 状态方案再动手**）
+- **前置决策（评审提出）**：MCP server 是无状态 per-call 的，而现有工具依赖
+  每 run 的 ctx（conversation/username/sent_count/img_stem）。两个选项：
+  a) ctx 变工具参数（模型多传几个参数，简单但 prompt 变长）；
+  b) server 侧维护会话态（run_id → ctx 映射，语义最像现在）。
+  倾向 b，但要在设计稿里定死再开工
+- **预算语义必须在 MCP 层同样强制**："每入站 1 次 send_message"不能因为换了
+  入口（MCP/HTTP）就被绕过——预算计数放在工具实现本体里，随 ctx 走
 - `wxbot_mcp.py`：FastMCP 包 5 个内部工具 + 网关转发 + send_image/send_text
 - wxapi HTTP 与 MCP server 并存（前者给脚本/curl，后者给 agent 客户端）
 - 顺带收益：ZCode 里就能直接调 bot 工具调试（我现在调试要跑 python -c，以后 /mcp 直调）
 
-### 阶段 C：Pi spike（可选，1-2 晚）
+### 阶段 C：Pi spike（可选，严格 timebox 1-2 晚）
 - pi RPC 模式 + extension 调 wxapi HTTP，跑通一次"排八字并发群里"
-- 评估：延迟（子进程+RPC 开销）、StepFun thinking 兼容、extension 维护成本
+- **评测方法（评审修正）**：我们的触发模式是每条入站消息一次短 run——
+  spike 必须按"**常驻子进程 + 多次 run 复用**"测延迟（pi RPC 会话保持），
+  不能按 per-run spawn 子进程测，否则消息频率会把进程开销放大，1.5 倍标准
+  轻松不达标，结论失真
+- 评估：常驻复用下的 per-run 延迟、StepFun thinking 兼容、extension 维护成本
 - 通过标准：端到端延迟 ≤ PydanticAI 脑的 1.5 倍且功能不缺；不达标就留在调研报告里吃灰
 
 ## 5. 明确不做的事

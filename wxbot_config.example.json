@@ -220,7 +220,8 @@
       "生成一张",
       "生图"
     ],
-    "max_tokens": 3600
+    "max_tokens": 3600,
+    "engine": "builtin"
   },
   "imagegen": {
     "enabled": true,

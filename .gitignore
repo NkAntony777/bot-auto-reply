@@ -38,3 +38,4 @@ fresh_*.png
 full_window_*.png
 _wxapi_e2e.log
 _wxapi_server.log
+_fixtures/results/

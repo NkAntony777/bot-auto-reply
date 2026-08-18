@@ -44,7 +44,8 @@
 | 文件 | 职责 |
 |---|---|
 | `wxbot.py` | 主守护：DB 驱动轮询、回复策略（冷却/免打扰/@门控/unlimited 群）、人格注入、分句发送、LLM fallback 与全局退避、日志 Tee |
-| `wxbot_agent.py` | **agent 层（Phase 1）**：混合路由（快/慢双路径）、tools 多轮循环（max_rounds=5 / tool_budget=8 双预算）、内部工具 5 个（查群史/成员/统计/预约发送/**AI 画图**）+ antony.best 网关工具注入、send_message 每入站 1 次限额 + 内容过滤、生成图 [IMG:] 标记 harness 兜底 |
+| `wxbot_agent.py` | **agent 层路由与 builtin 引擎**：混合路由（快/慢双路径，快路径永远不进框架）、手写 tools 循环（builtin 引擎，保底可回滚）、内部工具 5 个（查群史/成员/统计/预约发送/AI 画图）+ antony.best 网关工具注入、**收口层 finalize_reply（双引擎共用：outbound 预约/[IMG:] 兜底/截断）** |
+| `wxbot_agent_py.py` | **pydantic 引擎（阶段 A，当前默认）**：PydanticAI v2——typed 工具校验、FallbackModel（StepFun→MiniMax 零手写）、output validator+retries 治 StepFun 空响应、UsageLimits 兜底；预算回填在 `_budgeted` 包装层（先于框架触发）。`agent.engine` 一行切回 builtin |
 | `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
 | `wxbot_genimg.py` | **StepFun 文生图**（step_plan 套餐内，与 LLM 同 key 同域名）：`step-image-edit-2`，b64_json 落盘 `wxbot_images/generated/`，同 prompt 同 seed 一天内可复现，目录自动清理 |
 | `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
@@ -158,7 +159,8 @@ generate_image 走 StepFun 同 key 生图（`wxbot_genimg`），回复带 `[IMG:
 - `reply.context_messages`：每会话上下文条数（default + 按群覆盖）
 - `reply.deny_contacts`：文件传输助手/微信团队等内置入口，绝不回复
 - `personas.behaviors`：@/表情/贴纸/图片/引用 的 0~1 频率（发送时掷骰子节流；贴纸/表情/图片发送当前为 stub，日志会提示跳过）
-- `agent.*`：agent 层开关与预算——`enabled`（总开关）、`max_rounds`（LLM 轮数，
+- `agent.*`：agent 层开关与预算——`engine`（`builtin` 手写循环 / `pydantic` PydanticAI v2，
+  当前默认 pydantic，一行回滚）、`enabled`（总开关）、`max_rounds`（LLM 轮数，
   默认 5）、`tool_budget`（工具执行次数，默认 8）、`max_tokens`（agent 轮生成
   预算，默认 3600——思考型模型带工具结果的轮次 2400 不够会空响应）、
   `allow_send_message`（一键关掉自主发送）、`route_keywords`（慢路径触发词，
