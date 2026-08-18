@@ -185,5 +185,13 @@
   "state_file": "YOUR_ABS_PATH/wxbot_state.json",
   "own_nicknames": [
     "YOUR_WECHAT_NICKNAME"
-  ]
+  ],
+  "gateway": {
+    "enabled": true,
+    "base_url": "https://antony.best/api/v1",
+    "token_file": "D:/玄学/antony-best/web/.tool-gateway-token.local",
+    "cache_ttl_s": 3600,
+    "timeout_s": 15,
+    "max_tools_per_reply": 6
+  }
 }
