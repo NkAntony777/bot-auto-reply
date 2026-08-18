@@ -87,12 +87,13 @@ POST /api/v1/tools/:name     body: 参数 JSON → 结果 JSON
    由首 token 分类或规则决定
 4. **网页搜索工具**：接 search API（用户有 anysearch/zhihu-cli 基建可复用）
 
-### Phase 4 —— 可选：框架化重构（按需，不急）
+### Phase 4 —— 框架化重构（已调研，方案定稿 2026-08-18）
 
-当 Phase 1-3 的手写循环开始感觉吃力（复杂编排/多 agent 协作/状态机）再考虑：
-- **LangGraph**（Python 原生，直接 import 现有模块，成本最低）
-- **pi agent**（TS 极简 harness）：需把 Python 执行层包成本地 HTTP 服务桥接
-- 届时 wxmini2/DB 层不动，只换决策编排层——执行层是资产，框架是耗材
+完整调研见 **docs/RESEARCH_AGENT_FRAMEWORK.md**，结论：三层演进——
+- **A（近期）**：PydanticAI v2 换 agent 内核（`agent.engine` 开关灰度，工具原样注册）
+- **B（中期）**：工具层 MCP 化（wxbot_mcp.py，框架选择从此可逆）
+- **C（可选 spike）**：pi RPC 模式作第二大脑（wxapi HTTP 桥已就绪，1-2 晚验证）
+- LangGraph 现阶段不引入；wxmini2/DB 层永远不动——执行层是资产，框架是耗材
 
 ## 4. antony.best 现状探测结论（2026-08-17 实测）
 
