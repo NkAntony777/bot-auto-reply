@@ -161,21 +161,27 @@ def search_videos(cfg, query: str) -> str:
         d = r.json()
         results = (d.get("results") or (d.get("data") or {}).get("results")
                    or d.get("videos") or [])
-        if isinstance(results, dict):     # {sourceKey: [...]} 聚合形态
-            flat = []
+        flat = []
+        if results and isinstance(results[0], dict) and "items" in results[0]:
+            # 分组形态：[{source_code, source_name, items: [{vod_id, vod_name, vod_remarks...}]}]
+            for grp in results:
+                for it in grp.get("items") or []:
+                    it.setdefault("_src", grp.get("source_name") or grp.get("source_code") or "")
+                    flat.append(it)
+        elif isinstance(results, dict):
             for src, items in results.items():
                 for it in items or []:
                     it.setdefault("_src", src)
                     flat.append(it)
-            results = flat
-        if not results:
+        else:
+            flat = results
+        if not flat:
             return f"「{query}」没搜到影视资源。可以换个片名试试。"
-        lines = [f"「{query}」影视搜索结果："]
-        for v in results[:8]:
-            title = v.get("title") or v.get("name") or "?"
-            src = v.get("_src") or v.get("source") or ""
-            note = " ".join(str(x) for x in (v.get("year"), v.get("type"),
-                                             v.get("category")) if x)
+        lines = [f"「{query}」影视搜索（{d.get('totalItems', len(flat))} 条）："]
+        for v in flat[:8]:
+            title = v.get("vod_name") or v.get("title") or v.get("name") or "?"
+            src = v.get("_src") or v.get("source_name") or v.get("source") or ""
+            note = v.get("vod_remarks") or ""
             lines.append(f"- {title}" + (f"（{src}）" if src else "")
                          + (f" ｜{note}" if note else ""))
         lines.append("以上来自光影阁聚合源（通过 antony.best 代理）。")
