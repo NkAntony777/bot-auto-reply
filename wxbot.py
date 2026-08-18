@@ -1334,6 +1334,7 @@ def _send_reply(cfg, state, name, reply, is_group, last_bubble, is_target, ctx_l
     sd = cfg["reply"].get("sentence_delay_s", [1.0, 2.5])
     sent_ok = 0
     send_failures = 0
+    critical_fail = False  # AUDIO/IMG 等关键内容没发出去：整轮不标已回复，下轮重试
     for i, sent in enumerate(sentences):
         try:
             # [Q] 前缀：引用对方那条消息再回复（第一句有效，按 quote 频率节流）
@@ -1412,12 +1413,17 @@ def _send_reply(cfg, state, name, reply, is_group, last_bubble, is_target, ctx_l
                 if apath:
                     print(f"[wxbot] send audio to {name}: {os.path.basename(apath)}")
                     try:
-                        wx.send_file(name, apath)
-                        state.record_sent(name, f"[语音:{os.path.basename(apath)}]")
-                        sent_ok += 1
+                        if wx.send_file(name, apath, own_fragments=sentences):
+                            state.record_sent(name, f"[语音:{os.path.basename(apath)}]")
+                            sent_ok += 1
+                        else:
+                            print(f"[wxbot] send audio FAILED to {name}")
+                            send_failures += 1
+                            critical_fail = True
                     except Exception as e:
                         print(f"send audio error: {e}")
                         send_failures += 1
+                        critical_fail = True
                 else:
                     print(f"[wxbot] audio not resolved: {astem}")
                 if i < len(sentences) - 1:
@@ -1436,12 +1442,17 @@ def _send_reply(cfg, state, name, reply, is_group, last_bubble, is_target, ctx_l
                 if img_path:
                     print(f"[wxbot] send image to {name}: {os.path.basename(img_path)}")
                     try:
-                        wx.send_image(name, img_path)
-                        state.record_sent(name, f"[图片:{os.path.basename(img_path)}]")
-                        sent_ok += 1
+                        if wx.send_image(name, img_path, own_fragments=sentences):
+                            state.record_sent(name, f"[图片:{os.path.basename(img_path)}]")
+                            sent_ok += 1
+                        else:
+                            print(f"[wxbot] send image FAILED to {name}")
+                            send_failures += 1
+                            critical_fail = True
                     except Exception as e:
                         print(f"send image error: {e}")
                         send_failures += 1
+                        critical_fail = True
                 if i < len(sentences) - 1:
                     time.sleep(random.uniform(sd[0], sd[1]))
                 continue
@@ -1480,7 +1491,7 @@ def _send_reply(cfg, state, name, reply, is_group, last_bubble, is_target, ctx_l
             print(traceback.format_exc())
             send_failures += 1
             break
-    done = send_failures == 0 or sent_ok > 0
+    done = (send_failures == 0 or sent_ok > 0) and not critical_fail
     if done:
         # 有句子成功发出即算这轮回复完成（含部分成功：避免下轮重复回复）
         state.mark_replied(name, target_text)

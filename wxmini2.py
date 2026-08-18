@@ -1228,6 +1228,26 @@ def _input_box_text_stripped(hwnd: int) -> str:
     return t.strip()
 
 
+def _clear_input_box(hwnd: int) -> bool:
+    """清空输入框草稿（点输入框 → 全选 → 删除），返回是否已空。"""
+    import pyautogui
+    l, t, r, b, w, h = get_window_rect(hwnd)
+    pyautogui.click(l + int(w * 0.55), t + int(h * 0.89), duration=0.1)
+    time.sleep(0.2)
+    pyautogui.hotkey('ctrl', 'a', interval=0.05)
+    pyautogui.press('delete')
+    time.sleep(0.2)
+    return not _input_box_text_stripped(hwnd)
+
+
+def _draft_is_own(draft: str, own_fragments) -> bool:
+    """草稿像不像 bot 自己上一句没发完的残片（残片⊆本批某句，且不太长）。
+    像就允许清掉重发；不像（可能是真人草稿）必须保留，交给调用方放弃。"""
+    if not draft or not own_fragments or len(draft) > 30:
+        return False
+    return any(draft in s for s in own_fragments if s)
+
+
 def _find_send_button(hwnd: int):
     """OCR 找「发送」按钮的屏幕坐标（Enter 失败时的兜底点击）。
     bbox 是 crop 内坐标，换算窗口比例前必须加回 crop 原点偏移
@@ -1339,10 +1359,12 @@ def _wait_file_in_db(username: Optional[str], since_ts: float, timeout_s: float 
     return False
 
 
-def send_file(contact: str, path: str) -> bool:
+def send_file(contact: str, path: str, own_fragments=None) -> bool:
     """发任意文件（CF_HDROP 剪贴板粘贴，与发图同一条稳定链）。
     mp3/wav 等音频在微信里以可内联播放的文件卡片呈现——PC 端没有原生语音气泡，
-    这是 bot 发语音的实际形态。"""
+    这是 bot 发语音的实际形态。
+    own_fragments：调用方本批要发的句子。输入框草稿若是其中残片（上次没发完），
+    清掉重发；否则当真人草稿，放弃。"""
     if not os.path.exists(path):
         print(f"[wxmini2] send_file: file not found {path}")
         return False
@@ -1352,7 +1374,7 @@ def send_file(contact: str, path: str) -> bool:
     park_wechat(hwnd)
     prev_fg = C.windll.user32.GetForegroundWindow()
     try:
-        return _send_file_core(hwnd, contact, path)
+        return _send_file_core(hwnd, contact, path, own_fragments)
     finally:
         if prev_fg and prev_fg != hwnd:
             try:
@@ -1361,7 +1383,7 @@ def send_file(contact: str, path: str) -> bool:
                 pass
 
 
-def _send_file_core(hwnd: int, contact: str, path: str) -> bool:
+def _send_file_core(hwnd: int, contact: str, path: str, own_fragments=None) -> bool:
     import pyautogui
     gap = time.time() - _last_send_ts[0]
     if gap < _MIN_SEND_GAP_S:
@@ -1392,8 +1414,11 @@ def _send_file_core(hwnd: int, contact: str, path: str) -> bool:
     time.sleep(0.25)
     draft = _input_box_text_stripped(hwnd)
     if draft:
-        print(f"[wxmini2] send_file abort: input has draft {draft[:20]!r}")
-        return False
+        if _draft_is_own(draft, own_fragments) and _clear_input_box(hwnd):
+            print(f"[wxmini2] cleared own draft {draft[:20]!r}, resending file")
+        else:
+            print(f"[wxmini2] send_file abort: input has draft {draft[:20]!r}")
+            return False
     # 2. 文件上剪贴板 → 粘贴（文件卡片预览约 1s）
     if not _set_clipboard_files([os.path.abspath(path)]):
         return False
@@ -1419,10 +1444,11 @@ def _send_file_core(hwnd: int, contact: str, path: str) -> bool:
     return sent
 
 
-def send_image(contact: str, path: str) -> bool:
+def send_image(contact: str, path: str, own_fragments=None) -> bool:
     """发图片：CF_DIB 上剪贴板 → 点输入框 → Ctrl+V → Enter → DB 确认图片消息。
     走剪贴板粘贴而不是「+」→文件对话框：对话框是独立渲染面，视觉定位易碎；
-    粘贴路径只依赖输入框焦点，和发文本同一条稳定链。"""
+    粘贴路径只依赖输入框焦点，和发文本同一条稳定链。
+    own_fragments 同 send_file：草稿是自家残片才清，真人草稿保留。"""
     if not os.path.exists(path):
         print(f"[wxmini2] send_image: file not found {path}")
         return False
@@ -1432,7 +1458,7 @@ def send_image(contact: str, path: str) -> bool:
     park_wechat(hwnd)
     prev_fg = C.windll.user32.GetForegroundWindow()
     try:
-        return _send_image_core(hwnd, contact, path)
+        return _send_image_core(hwnd, contact, path, own_fragments)
     finally:
         if prev_fg and prev_fg != hwnd:
             try:
@@ -1441,7 +1467,7 @@ def send_image(contact: str, path: str) -> bool:
                 pass
 
 
-def _send_image_core(hwnd: int, contact: str, path: str) -> bool:
+def _send_image_core(hwnd: int, contact: str, path: str, own_fragments=None) -> bool:
     import pyautogui
     gap = time.time() - _last_send_ts[0]
     if gap < _MIN_SEND_GAP_S:
@@ -1472,8 +1498,11 @@ def _send_image_core(hwnd: int, contact: str, path: str) -> bool:
     time.sleep(0.25)
     draft = _input_box_text_stripped(hwnd)
     if draft:
-        print(f"[wxmini2] send_image abort: input has draft {draft[:20]!r}")
-        return False
+        if _draft_is_own(draft, own_fragments) and _clear_input_box(hwnd):
+            print(f"[wxmini2] cleared own draft {draft[:20]!r}, resending image")
+        else:
+            print(f"[wxmini2] send_image abort: input has draft {draft[:20]!r}")
+            return False
     # 2. 图片上剪贴板 → 粘贴（缩略图渲染约 1s）
     if not _set_clipboard_image(path):
         return False
