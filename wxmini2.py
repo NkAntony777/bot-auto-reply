@@ -463,12 +463,17 @@ def read_chat_db(username: str, limit: int = 20) -> List[Dict]:
     """按 username 直接读数据库消息（不依赖窗口/OCR）。
     返回正序 [{kind, text, side, sender, ts}]；
     side 判定：SenderName2Id 映射对照 db.wxid（权威），映射缺失时用
-    filehelper 探测的自 sid 兜底。群消息内容剥离 'wxid_xxx:\n' 前缀。"""
+    filehelper 探测的自 sid 兜底。群消息内容剥离 'wxid_xxx:\n' 前缀。
+    DB 连接坏损（malformed/unpack，微信活跃写入时偶发）自动重置单例下轮重建。"""
     db = _get_db()
     try:
         msgs = db.get_messages(username, limit=limit)
     except Exception as e:
-        print(f"[wxmini2] read_chat_db error: {e}")
+        msg = str(e)
+        print(f"[wxmini2] read_chat_db error: {msg[:80]}")
+        if "malformed" in msg or "unpack" in msg or "database is locked" in msg:
+            _WECHAT_DB[0] = None   # 重置单例：下次调用重建连接（重新做 WAL 合并）
+            print("[wxmini2] db unhealthy, singleton reset for rebuild")
         return []
     wxid = db.wxid
     is_chatroom = username.endswith("@chatroom")

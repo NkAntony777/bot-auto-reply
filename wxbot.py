@@ -1105,7 +1105,7 @@ def poll_once(cfg, state, hwnd):
             incoming = f"【发送者: 不确定，按普通群友礼貌友善对待】{target_text}"
         else:
             incoming = target_text
-        reply = wxbot_agent.reply_dispatch(cfg, name, incoming, context=ctx_lines,
+        reply = wxbot_agent.reply_dispatch(cfg, name, incoming, ctx_lines=ctx_lines,
                                            is_group=is_group, username=username)
         if not reply:
             _llm_note_failure()
@@ -1117,7 +1117,7 @@ def poll_once(cfg, state, hwnd):
             print(f"[poll] {name} target msg must not SKIP, regenerating")
             reply = wxbot_agent.reply_dispatch(
                 cfg, name, incoming + "\n（系统提示：这是对线目标的发言，你必须反击，绝不许回 [SKIP]）",
-                context=ctx_lines, is_group=is_group, username=username)
+                ctx_lines=ctx_lines, is_group=is_group, username=username)
             if not reply:
                 _llm_note_failure()
                 continue
@@ -1234,7 +1234,7 @@ def poll_once(cfg, state, hwnd):
                         time.sleep(random.uniform(sd[0], sd[1]))
                     continue
                 # [IMG:关键词] 标记：发图片而不是文字
-                im_m = re.match(r"^\[(?:IMG(?::([^\]]*))?\]$", sent.strip())
+                im_m = re.match(r"^\[(?:IMG(?::([^\]]*))?\]$)", sent.strip())
                 if im_m:
                     img_path = (pick_image(cfg, (im_m.group(1) or "").strip())
                                 if cfg.get("images", {}).get("enabled", True) else None)
@@ -1285,7 +1285,9 @@ def poll_once(cfg, state, hwnd):
                 if i < len(sentences) - 1:
                     time.sleep(random.uniform(sd[0], sd[1]))
             except Exception as e:
+                import traceback
                 print(f"send sentence to {name} error:", e)
+                print(traceback.format_exc())
                 send_failures += 1
                 break
         if send_failures == 0 or sent_ok:
