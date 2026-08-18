@@ -1206,18 +1206,24 @@ def poll_once(cfg, state, hwnd):
                         time.sleep(random.uniform(sd[0], sd[1]))
                     continue
                 # [IMG:关键词] 标记：发图片而不是文字
-                im_m = re.match(r"^\[IMG(?::([^\]]*))?\]$", sent.strip())
+                im_m = re.match(r"^\[(?:IMG(?::([^\]]*))?\]$", sent.strip())
                 if im_m:
-                    if not _roll(beh["image"]):
+                    img_path = (pick_image(cfg, (im_m.group(1) or "").strip())
+                                if cfg.get("images", {}).get("enabled", True) else None)
+                    # AI 生成图（gen_ 前缀）不走行为节流：那是模型按请求专门生成的
+                    generated = bool(img_path and os.path.basename(img_path).startswith("gen_"))
+                    if not generated and not _roll(beh["image"]):
                         print(f"[wxbot] image throttled ({beh['image']:.0%})")
                         continue
-                    if cfg.get("images", {}).get("enabled", True):
-                        img_path = pick_image(cfg, (im_m.group(1) or "").strip())
-                        if img_path:
-                            print(f"[wxbot] send image to {name}: {os.path.basename(img_path)}")
+                    if img_path:
+                        print(f"[wxbot] send image to {name}: {os.path.basename(img_path)}")
+                        try:
                             wx.send_image(name, img_path)
                             state.record_sent(name, f"[图片:{os.path.basename(img_path)}]")
                             sent_ok += 1
+                        except Exception as e:
+                            print(f"send image error: {e}")
+                            send_failures += 1
                     if i < len(sentences) - 1:
                         time.sleep(random.uniform(sd[0], sd[1]))
                     continue

@@ -44,8 +44,9 @@
 | 文件 | 职责 |
 |---|---|
 | `wxbot.py` | 主守护：DB 驱动轮询、回复策略（冷却/免打扰/@门控/unlimited 群）、人格注入、分句发送、LLM fallback 与全局退避、日志 Tee |
-| `wxbot_agent.py` | **agent 层（Phase 1）**：混合路由（快/慢双路径）、tools 多轮循环（max_rounds=5 / tool_budget=8 双预算）、内部工具 4 个（查群史/成员/统计/预约发送）+ antony.best 网关工具注入、send_message 每入站 1 次限额 + 内容过滤 |
+| `wxbot_agent.py` | **agent 层（Phase 1）**：混合路由（快/慢双路径）、tools 多轮循环（max_rounds=5 / tool_budget=8 双预算）、内部工具 5 个（查群史/成员/统计/预约发送/**AI 画图**）+ antony.best 网关工具注入、send_message 每入站 1 次限额 + 内容过滤、生成图 [IMG:] 标记 harness 兜底 |
 | `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
+| `wxbot_genimg.py` | **StepFun 文生图**（step_plan 套餐内，与 LLM 同 key 同域名）：`step-image-edit-2`，b64_json 落盘 `wxbot_images/generated/`，同 prompt 同 seed 一天内可复现，目录自动清理 |
 | `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
 | `wxapi.py` | **操作 API 层**（2026-08-18）：固定坐标快路径 open_chat（DB 行号+标题模板验证，OCR 退兜底）、剪贴板发图/发文件（CF_DIB/CF_HDROP）、HTTP API（127.0.0.1+token+单飞锁）、CLI 直调；详见 `docs/WXAPI.md` |
 | `wechatauto`（venv 包） | 微信 4.x 解密库：进程内存提取 SQLCipher key、库解密、WAL 增量合并、消息/会话查询 |
@@ -142,10 +143,12 @@ tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终�
 **agent 层（Phase 1，2026-08-18 上线）**：`wxbot_agent.reply_dispatch` 混合路由——
 闲聊走原快路径（延迟不变）；网关相关性命中/路由关键词/点名问句走 `agent_reply`
 tools 循环（StepFun 与 MiniMax 的 tool_calls 均为标准 OpenAI 格式，已实测）。
-工具：内部 4 个（query_chat_history / query_member_info / query_group_stats /
-send_message）+ antony.best 网关 13 个玄学工具（`antony_` 前缀，seed 自动按
-消息指纹注入保证同问同答）。send_message 是**预约发送**（每入站 1 次限额 +
+工具：内部 5 个（query_chat_history / query_member_info / query_group_stats /
+send_message / **generate_image**）+ antony.best 网关 13 个玄学工具（`antony_` 前缀，
+seed 自动按消息指纹注入保证同问同答）。send_message 是**预约发送**（每入站 1 次限额 +
 内容过滤），真正发送仍走 poll 的 delay/分句/发送链，循环内不碰窗口。
+generate_image 走 StepFun 同 key 生图（`wxbot_genimg`），回复带 `[IMG:gen_xxx]`
+标记由 harness 兜底保证不丢，poll 的 IMG 分支对生成图跳过行为节流直发。
 依赖新增：`pip install zstandard`（微信 4.x zstd 压缩消息解压）。
 
 ## 7. 配置速查（wxbot_config.json）
@@ -156,8 +159,12 @@ send_message）+ antony.best 网关 13 个玄学工具（`antony_` 前缀，seed
 - `reply.deny_contacts`：文件传输助手/微信团队等内置入口，绝不回复
 - `personas.behaviors`：@/表情/贴纸/图片/引用 的 0~1 频率（发送时掷骰子节流；贴纸/表情/图片发送当前为 stub，日志会提示跳过）
 - `agent.*`：agent 层开关与预算——`enabled`（总开关）、`max_rounds`（LLM 轮数，
-  默认 5）、`tool_budget`（工具执行次数，默认 8）、`allow_send_message`（一键关掉
-  自主发送）、`route_keywords`（慢路径触发词，跑一周再调）
+  默认 5）、`tool_budget`（工具执行次数，默认 8）、`max_tokens`（agent 轮生成
+  预算，默认 3600——思考型模型带工具结果的轮次 2400 不够会空响应）、
+  `allow_send_message`（一键关掉自主发送）、`route_keywords`（慢路径触发词，
+  跑一周再调；含画图触发词）
+- `imagegen.*`：StepFun 文生图——`enabled`、`model`（step-image-edit-2）、
+  `steps`/`cfg_scale`、`max_side`（发送前缩边）、`keep_files`（generated/ 保留张数）
 - `gateway.*`：antony.best 工具网关（入口/token 文件/超时/每消息最多注入工具数）
 - `state_file`：状态持久化（seen 指纹 / replied / sent）
 
@@ -179,9 +186,10 @@ send_message）+ antony.best 网关 13 个玄学工具（`antony_` 前缀，seed
 
 - 发送仍需真实鼠标键盘事件 + 微信前台可见（视觉方案本质），已用"等空闲+停靠+还焦点"把干扰降到最低
 - 微信渲染挂死无法根治，靠三级自愈兜底（最坏重启约 90 秒）
-- **发图/发文件已可用（wxapi）**：`wxapi.py` 的 `send_image`/`send_file`（剪贴板
-  粘贴，零弹窗）+ HTTP/CLI 封装，DB 类型确认；`send_sticker` / `send_emoji` /
-  `quote_reply` 在 wxmini2 仍是占位 stub；贴纸目录
+- **发图已可用（双实现）**：`wxmini2.send_image`（CF_DIB 剪贴板粘贴 → Enter →
+  DB 图片消息确认，AI 画图链路 2026-08-18 实弹验证）与 `wxapi.py` 的
+  `send_image`/`send_file`（同思路独立实现 + HTTP/CLI 封装）；`send_sticker` /
+  `send_emoji` / `quote_reply` 在 wxmini2 仍是占位 stub；贴纸目录
   `wxbot_images/stickers/catalog.json` 不存在时会打无害告警
 - 对方发图目前只传占位文本给 LLM（DB 拿不到气泡截图，识图链路待接）
 - state 的 seen 指纹以"最新消息"为键：批量离线消息涌来时只处理最新一条（设计取舍，防刷屏）

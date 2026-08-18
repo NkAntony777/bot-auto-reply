@@ -1165,10 +1165,132 @@ def send_text_at(contact: str, text: str, at_user: str) -> bool:
     """@某人发消息。先发普通消息，再@。简单实现：发消息，附加 [AT]标记。"""
     return send_text(contact, f"{text}\n@{at_user}")
 
-def send_image(contact: str, path: str) -> bool:
-    """发图片（暂未实现：需要打开图片按钮、文件对话框、确认）"""
-    print("[wxmini2] send_image: 暂未实现（视觉方案需点文件对话框）")
+def _set_clipboard_image(path: str) -> bool:
+    """图片文件 → 剪贴板 CF_DIB（PIL 存 BMP 再去掉 14 字节文件头；
+    带 alpha 的先贴白底，否则 CF_DIB 按 BI_RGB 解读会变黑底）。"""
+    import io
+    try:
+        import win32clipboard as wc
+        from PIL import Image
+        img = Image.open(path)
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGBA")
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        with io.BytesIO() as out:
+            img.save(out, "BMP")
+            dib = out.getvalue()[14:]
+        wc.OpenClipboard()
+        try:
+            wc.EmptyClipboard()
+            wc.SetClipboardData(wc.CF_DIB, dib)
+        finally:
+            wc.CloseClipboard()
+        return True
+    except Exception as e:
+        print("[wxmini2] set clipboard image failed:", e)
+        return False
+
+
+def _wait_image_in_db(username: Optional[str], since_ts: float, timeout_s: float = 30.0) -> bool:
+    """轮询 DB 等 own 侧出现 since_ts 之后的图片消息（发送硬确认）。"""
+    if not username:
+        return False
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        try:
+            msgs = read_chat_db(username, limit=5)
+        except Exception:
+            msgs = []
+        for m in msgs:
+            if (m.get("side") == "own" and m.get("kind") == "image"
+                    and float(m.get("ts") or 0) >= since_ts - 2):
+                return True
+        time.sleep(1.5)
     return False
+
+
+def send_image(contact: str, path: str) -> bool:
+    """发图片：CF_DIB 上剪贴板 → 点输入框 → Ctrl+V → Enter → DB 确认图片消息。
+    走剪贴板粘贴而不是「+」→文件对话框：对话框是独立渲染面，视觉定位易碎；
+    粘贴路径只依赖输入框焦点，和发文本同一条稳定链。"""
+    if not os.path.exists(path):
+        print(f"[wxmini2] send_image: file not found {path}")
+        return False
+    if not wait_user_idle():
+        print("[wxmini2] user still active, sending anyway (timeout)")
+    hwnd = find_wechat()
+    park_wechat(hwnd)
+    prev_fg = C.windll.user32.GetForegroundWindow()
+    try:
+        return _send_image_core(hwnd, contact, path)
+    finally:
+        if prev_fg and prev_fg != hwnd:
+            try:
+                C.windll.user32.SetForegroundWindow(prev_fg)
+            except Exception:
+                pass
+
+
+def _send_image_core(hwnd: int, contact: str, path: str) -> bool:
+    import pyautogui
+    gap = time.time() - _last_send_ts[0]
+    if gap < _MIN_SEND_GAP_S:
+        time.sleep(_MIN_SEND_GAP_S - gap)
+    force_foreground(hwnd)
+    if not open_chat_by_click(hwnd, contact, timeout=6.0):
+        print(f"[wxmini2] open_chat failed: {contact}")
+        return False
+    time.sleep(0.3)
+    if not ensure_chat_rendered(hwnd):
+        print("[wxmini2] render dead, escalating to WeChat restart")
+        try:
+            hwnd = restart_wechat()
+            if not open_chat_by_click(hwnd, contact, timeout=6.0):
+                return False
+            if not ensure_chat_rendered(hwnd):
+                return False
+        except Exception as e:
+            print("[wxmini2] restart_wechat failed:", e)
+            return False
+    target_username = (_LAST_OPENED[0] or (None, None))[1]
+    l, t, r, b, w, h = get_window_rect(hwnd)
+    # 1. 点输入框并确认无残留草稿（防 Enter 误发旧文本/旧图）
+    force_foreground(hwnd)
+    in_x = l + int(w * 0.55)
+    in_y = t + int(h * 0.89)
+    pyautogui.click(in_x, in_y, duration=0.1)
+    time.sleep(0.25)
+    draft = _input_box_text_stripped(hwnd)
+    if draft:
+        print(f"[wxmini2] send_image abort: input has draft {draft[:20]!r}")
+        return False
+    # 2. 图片上剪贴板 → 粘贴（缩略图渲染约 1s）
+    if not _set_clipboard_image(path):
+        return False
+    pyautogui.hotkey('ctrl', 'v', interval=0.05)
+    time.sleep(1.2)
+    # 3. 发送：Enter，未确认再 Ctrl+Enter；DB 出现 own 图片消息才算成
+    t0 = time.time()
+    sent = False
+    for method in ('enter', 'ctrl_enter'):
+        if method == 'enter':
+            pyautogui.press('enter')
+        else:
+            pyautogui.hotkey('ctrl', 'enter')
+        time.sleep(1.0)
+        if _wait_image_in_db(target_username, t0, timeout_s=20.0):
+            sent = True
+            break
+        print(f"[wxmini2] send_image via {method} not confirmed, trying next")
+    if sent:
+        _last_send_ts[0] = time.time()
+    else:
+        print("[wxmini2] send_image not confirmed in DB")
+    return sent
 
 def send_emoji(contact: str, name: str) -> bool:
     """发微信自带 emoji（暂未实现）"""

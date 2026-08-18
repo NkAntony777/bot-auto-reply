@@ -211,7 +211,24 @@
       "黄历",
       "八字",
       "紫微",
-      "六爻"
-    ]
+      "六爻",
+      "画一张",
+      "画个",
+      "画只",
+      "画张",
+      "画图",
+      "生成一张",
+      "生图"
+    ],
+    "max_tokens": 3600
+  },
+  "imagegen": {
+    "enabled": true,
+    "model": "step-image-edit-2",
+    "steps": 8,
+    "cfg_scale": 1.0,
+    "timeout_s": 120,
+    "max_side": 1024,
+    "keep_files": 40
   }
 }

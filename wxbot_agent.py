@@ -32,8 +32,10 @@ DEFAULT_AGENT_CFG = {
     "max_rounds": 5,
     "tool_budget": 8,
     "result_max_chars": 2000,
+    "max_tokens": 3600,
     "allow_send_message": True,
-    "route_keywords": ["查", "谁", "最近", "排盘", "占卜", "算一卦", "塔罗", "黄历", "八字", "紫微", "六爻"],
+    "route_keywords": ["查", "谁", "最近", "排盘", "占卜", "算一卦", "塔罗", "黄历", "八字", "紫微",
+                        "六爻", "画一张", "画个", "画只", "画张", "画图", "生成一张", "生图"],
 }
 
 # 点名+问句路由的问句信号（中文无空格，只能子串匹配）
@@ -159,6 +161,28 @@ def _mk_query_group_stats(ctx):
     return exec_fn
 
 
+def _mk_generate_image(ctx):
+    def exec_fn(args):
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return "prompt 不能为空，请描述画面内容。"
+        gcfg = ctx["cfg"].get("imagegen") or {}
+        if not gcfg.get("enabled", True):
+            return "画图功能当前已关闭，请自然告知用户。"
+        import wxbot_genimg
+        try:
+            path, stem = wxbot_genimg.generate(ctx["cfg"], prompt)
+        except Exception as e:
+            return (f"画图失败：{str(e)[:120]}。请自然告知用户这会儿画不了，不要假装画了。")
+        import os
+        print(f"[agent] image generated: {os.path.basename(path)}")
+        ctx["img_stem"] = stem   # harness 兜底：确保最终回复带 [IMG:] 标记
+        return (f"图片已生成成功（这是事实，禁止说画图失败）。最终回复第一行必须原样写 "
+                f"[IMG:{stem}]，后面再配一两句符合你人格的话。不要用 send_message 发图，"
+                "不要再描述你画了什么，图会自己发出去。")
+    return exec_fn
+
+
 def _mk_send_message(ctx):
     """预约发送：记录到 ctx['outbound']，由 poll 的稳定发送链路真正发出。"""
     def exec_fn(args):
@@ -209,6 +233,13 @@ _INTERNAL_TOOLS = [
       "properties": {"text": {"type": "string", "description": "要发送的完整文本"}},
       "required": ["text"]},
      _mk_send_message),
+    ("generate_image",
+     "AI 画图：按文字描述生成一张图片并发到当前会话。用户想看图/让你画什么时用。",
+     {"type": "object",
+      "properties": {"prompt": {"type": "string",
+                                "description": "画面描述，中英文皆可，越具体越好（主体+风格+细节）"}},
+      "required": ["prompt"]},
+     _mk_generate_image),
 ]
 
 
@@ -288,9 +319,10 @@ def _extract_text(msg):
     return (text or "").strip()
 
 
-def _llm_chat(cfg, messages, tools=None):
+def _llm_chat(cfg, messages, tools=None, max_tokens=None):
     """带 tools 的 chat completions（主链挂了走 fallbacks）。返回 (message, finish_reason)。
-    全链失败返回 (None, None)。MiniMax m3 与 StepFun 均为标准 OpenAI tool_calls 格式（已实测）。"""
+    全链失败返回 (None, None)。MiniMax m3 与 StepFun 均为标准 OpenAI tool_calls 格式（已实测）。
+    max_tokens 可覆盖（agent 轮上下文带工具结果，思考型模型要留更多思考额度）。"""
     lcfg = cfg["llm"]
     attempts = [{
         "base_url": lcfg["base_url"],
@@ -311,7 +343,7 @@ def _llm_chat(cfg, messages, tools=None):
             "model": a["model"],
             "messages": messages,
             "temperature": lcfg.get("temperature", 0.9),
-            "max_tokens": lcfg.get("max_tokens", 2400),
+            "max_tokens": max_tokens or lcfg.get("max_tokens", 2400),
         }
         _thinking = lcfg.get("thinking")
         if _thinking is not None:
@@ -360,7 +392,7 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
     ctx = {
         "cfg": cfg, "acfg": acfg, "conversation": conversation,
         "username": username, "inbound": inbound, "is_group": is_group,
-        "outbound": None, "sent_count": 0,
+        "outbound": None, "sent_count": 0, "img_stem": None,
     }
 
     system = wxbot.system_prompt_for(cfg, conversation, inbound, is_group)
@@ -386,13 +418,23 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
     ]
     tool_array = [t["spec"] for t in tools.values()]
     budget = tool_budget
+    agent_max_tokens = int(acfg.get("max_tokens", 3600))
     final_text = None
     t0 = time.time()
+
+    def _with_img_marker(text):
+        """图已生成但模型没写 [IMG:] 标记时由 harness 兜底补上（不赌模型听话）。"""
+        stem = ctx.get("img_stem")
+        if stem and f"[IMG:{stem}" not in (text or ""):
+            print(f"[agent] prepending [IMG:{stem}] (model omitted marker)")
+            return f"[IMG:{stem}]\n{text or ''}"
+        return text
 
     for rnd in range(1, max_rounds + 1):
         # 最后一轮不再给工具，逼模型收口；预算耗尽同理
         use_tools = budget > 0 and rnd < max_rounds
-        msg, _finish = _llm_chat(cfg, messages, tool_array if use_tools else None)
+        msg, _finish = _llm_chat(cfg, messages, tool_array if use_tools else None,
+                                 max_tokens=agent_max_tokens)
         if msg is None:
             if rnd == 1:
                 return None  # 全链失败，poll 侧退避接管
@@ -409,7 +451,7 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
                 tc_id = tc.get("id") or f"call_{rnd}_{j}"
                 messages.append({"role": "tool", "tool_call_id": tc_id,
                                  "content": "已达轮数/额度上限，请直接给最终文字回复，不要再调用工具。"})
-            msg2, _ = _llm_chat(cfg, messages, None)
+            msg2, _ = _llm_chat(cfg, messages, None, max_tokens=agent_max_tokens)
             if msg2 is not None:
                 final_text = _extract_text(msg2)
             break
@@ -445,18 +487,19 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
     if final_text is None:
         if ctx["outbound"] is not None:
             print(f"[agent] no final text, using outbound ({len(ctx['outbound'])} chars)")
-            return ctx["outbound"]
+            return _with_img_marker(ctx["outbound"])
         print(f"[agent] rounds exhausted without final text ({time.time() - t0:.1f}s)")
-        return "[SKIP]"  # 跑完轮数仍无文本：按跳过处理，不触发 poll 退避
+        return _with_img_marker("") if ctx.get("img_stem") else "[SKIP]"  # 有图无文也发图
 
     if ctx["outbound"] is not None:
         if final_text and final_text != ctx["outbound"]:
             print(f"[agent] outbound overrides final text "
                   f"({len(ctx['outbound'])} vs {len(final_text)} chars)")
-        return ctx["outbound"]
+        return _with_img_marker(ctx["outbound"])
 
     limit = int(cfg["reply"].get("max_reply_chars", 300))
     print(f"[agent] done in {time.time() - t0:.1f}s, {tool_budget - budget} tool calls")
+    final_text = _with_img_marker(final_text)
     return final_text[:limit] if final_text else None
 
 
