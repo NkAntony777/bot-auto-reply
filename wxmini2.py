@@ -705,12 +705,24 @@ _RESTORE_W, _RESTORE_H = 1300, 1400
 
 def restore_wechat_to_primary(hwnd: int):
     """bot 退出时把微信还回主屏：大窗居中，恢复正常使用。
-    （bot 运行期间微信在虚拟屏营业，退出后归还桌面。）"""
+    （bot 运行期间微信在虚拟屏营业，退出后归还桌面。）
+    归还后自动做一次托盘复活切换（隐藏→唤出），重置 Qt 在跨屏 DPI
+    往返后偶发的输入僵死（点击/关闭无响应）——2026-08-17 实测踩坑。"""
     pw, ph = get_screen_size()
     req_w = min(_RESTORE_W, pw - 80)
     req_h = min(_RESTORE_H, ph - 80)
     _move_window_to(hwnd, 0, 0, pw, ph, req_w, req_h, center=True)
     print(f"[wxmini2] WeChat restored to primary screen")
+    # 输入状态重置：托盘图标完整切换优先，找不到退化为最小化/恢复
+    if not revive_via_tray(hwnd):
+        try:
+            C.windll.user32.ShowWindow(hwnd, 6)   # SW_MINIMIZE
+            time.sleep(0.5)
+            C.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            force_foreground(hwnd)
+            print("[wxmini2] input state reset via min/restore fallback")
+        except Exception as e:
+            print(f"[wxmini2] input state reset failed: {e}")
 
 def _grab_window(hwnd: int):
     """ImageGrab 截窗口屏幕区域。PrintWindow 对输入框等独立渲染层是盲区，
@@ -734,16 +746,18 @@ def _chat_content_px(hwnd: int) -> int:
     return int((arr < 130).sum())
 
 
-def revive_via_tray(hwnd: int) -> bool:
-    """点任务栏托盘的微信图标复活渲染挂死的窗口（用户实测有效，远轻于重启）。"""
+def _find_tray_wechat_button():
+    """在任务栏托盘找微信图标按钮，返回 (x, y) 或 None。
+    Win11 图标可能在主托盘，也可能藏在溢出弹窗（"^" chevron）里——
+    主托盘找不到就点开溢出弹窗再找（弹窗是独立顶层 XamlIsland 窗口）。"""
     try:
         import uiautomation as auto
     except ImportError:
-        return False
+        return None
     try:
         bar = auto.GetRootControl().Control(searchDepth=1, ClassName='Shell_TrayWnd')
         if not bar.Exists(1, 0.2):
-            return False
+            return None
 
         def walk(ctrl, depth):
             if depth <= 0:
@@ -757,20 +771,56 @@ def revive_via_tray(hwnd: int) -> bool:
                     return hit
             return None
 
-        btn = walk(bar, 4)
-        if btn is None:
-            print("[wxmini2] tray icon not found")
-            return False
-        r = btn.BoundingRectangle
-        if r.right <= r.left or r.bottom <= r.top:
-            return False
-        x, y = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+        def center(btn):
+            r = btn.BoundingRectangle
+            if r.right > r.left and r.bottom > r.top:
+                return (r.left + r.right) // 2, (r.top + r.bottom) // 2
+            return None
+
+        btn = walk(bar, 6)
+        if btn is not None:
+            pos = center(btn)
+            if pos:
+                return pos
+        # 主托盘没有 → 点开溢出弹窗（显示隐藏的图标）再找
+        for chev_name in ('显示隐藏的图标', 'Notification Chevron', '更多图标'):
+            chev = bar.Control(Name=chev_name, searchDepth=6)
+            if chev.Exists(0.5, 0.1):
+                pos = center(chev)
+                if pos:
+                    import pyautogui
+                    pyautogui.click(pos[0], pos[1], duration=0.08)
+                    time.sleep(0.8)
+                    break
+        # 溢出弹窗是顶层窗口：从桌面根找（先精确名，再深搜）
+        root = auto.GetRootControl()
+        cand = root.Control(Name='微信', searchDepth=8)
+        if cand.Exists(1.5, 0.2):
+            pos = center(cand)
+            if pos:
+                return pos
+        btn = walk(root, 6)
+        if btn is not None:
+            return center(btn)
+    except Exception as e:
+        print(f"[wxmini2] _find_tray_wechat_button error: {e}")
+    return None
+
+
+def revive_via_tray(hwnd: int) -> bool:
+    """点任务栏托盘的微信图标复活渲染/输入僵死的窗口（用户实测有效，远轻于重启）。
+    托盘图标是开关：点一下隐藏、再点一下唤出——完整切换正好重置窗口状态。"""
+    pos = _find_tray_wechat_button()
+    if not pos:
+        print("[wxmini2] tray icon not found")
+        return False
+    try:
         import pyautogui
-        pyautogui.click(x, y, duration=0.1)
+        pyautogui.click(pos[0], pos[1], duration=0.1)
         time.sleep(1.2)
-        # 托盘图标是开关：若窗口反而被隐藏，再点一次唤出
+        # 若窗口被隐藏，再点一次唤出
         if not C.windll.user32.IsWindowVisible(hwnd):
-            pyautogui.click(x, y, duration=0.1)
+            pyautogui.click(pos[0], pos[1], duration=0.1)
             time.sleep(1.0)
         force_foreground(hwnd)
         time.sleep(0.5)
