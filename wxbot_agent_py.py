@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior
+from pydantic_ai.exceptions import AgentRunError, ModelRetry
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -86,8 +86,18 @@ def _kb_mangpai(rc: RunContext[Deps], query: str, type: str = "all") -> str:
     return core._mk_kb_mangpai(rc.deps.ctx)({"query": query, "type": type})
 
 
+def _web_search(rc: RunContext[Deps], query: str, max_results: int = 5) -> str:
+    """联网搜索（AnySearch 全网搜，经 antony.best 代理）：实时新闻/价格/版本/政策等一切模型知识截止日期之后的事实都必须先搜再答，不要凭记忆编时效信息。"""
+    return core._mk_web_search(rc.deps.ctx)({"query": query, "max_results": max_results})
+
+
+def _web_extract(rc: RunContext[Deps], url: str) -> str:
+    """抓取指定 URL 的网页正文（搜索结果需要看详情时用）。"""
+    return core._mk_web_extract(rc.deps.ctx)({"url": url})
+
+
 _INTERNAL_FNS = [_q_history, _q_member, _q_stats, _send_message, _generate_image,
-                 _search_books, _search_videos, _kb_mangpai]
+                 _search_books, _search_videos, _kb_mangpai, _web_search, _web_extract]
 
 
 def _budgeted(fn):
@@ -240,9 +250,10 @@ def agent_reply(cfg, conversation, inbound, ctx_lines=None, is_group=True,
                                     request_limit=max_rounds + 2,
                                     tool_calls_limit=tool_budget + 2))
         final_text = result.output
-    except UnexpectedModelBehavior as e:
-        # 重试后仍空/异常：交给收口层（有 outbound/图照样发，否则 [SKIP]）
-        print(f"[agent-py] model behavior error after retries: {e}")
+    except AgentRunError as e:
+        # UsageLimitExceeded（轮数兜底触发）/ UnexpectedModelBehavior（重试后仍空）：
+        # 不 crash——交给收口层（有 outbound/图照样发，否则 [SKIP]），poll 侧零感知
+        print(f"[agent-py] run ended without final text ({type(e).__name__}): {str(e)[:120]}")
         final_text = None
     for line in deps.extra_lines:
         print(f"[agent-py] round {line}")

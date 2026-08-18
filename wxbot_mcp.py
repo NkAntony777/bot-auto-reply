@@ -199,6 +199,20 @@ def kb_mangpai(query: str, type: str = "all") -> str:
     return _trunc(wxbot_hub.kb_mangpai(wxbot.load_config(), query, type))
 
 
+@mcp.tool()
+def web_search(query: str, max_results: int = 5) -> str:
+    """联网搜索（AnySearch 全网搜，经 antony.best 代理；复用 PrivateGate 密语）。"""
+    import wxbot_hub
+    return _trunc(wxbot_hub.web_search(wxbot.load_config(), query, max_results))
+
+
+@mcp.tool()
+def web_extract(url: str) -> str:
+    """抓取指定 URL 的网页正文（搜索结果需要看详情时用）。"""
+    import wxbot_hub
+    return _trunc(wxbot_hub.web_extract(wxbot.load_config(), url))
+
+
 # ================================================================ 预算类（需 run_id）
 
 @mcp.tool()

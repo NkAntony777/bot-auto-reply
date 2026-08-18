@@ -156,6 +156,29 @@
    "expect_tools": [
     "kb_mangpai"
    ]
+  },
+  {
+   "id": "route-websearch",
+   "kind": "route",
+   "inbound": "【发送者昵称: 123】帮我搜一下今天的AI新闻",
+   "is_group": true,
+   "expect": "slow"
+  },
+  {
+   "id": "route-websearch2",
+   "kind": "route",
+   "inbound": "【发送者昵称: 123】最新出的显卡多少钱",
+   "is_group": true,
+   "expect": "slow"
+  },
+  {
+   "id": "full-websearch",
+   "kind": "full",
+   "inbound": "【发送者昵称: 123】【普通群友: 必须礼貌友善、积极帮助】搜一下现在 StepFun 最新的模型是什么",
+   "is_group": true,
+   "expect_tools": [
+    "web_search"
+   ]
   }
  ]
 }

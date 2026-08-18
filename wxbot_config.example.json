@@ -125,13 +125,6 @@
       }
     ]
   },
-  "search": {
-    "enabled": false,
-    "zhihu_cli": "C:/Users/YOUR_USER/AppData/Local/ZhihuCLI/current/zhihu-cli.exe",
-    "count": 3,
-    "timeout_s": 20,
-    "search_db": "all"
-  },
   "vision": {
     "enabled": true,
     "base_url": "https://YOUR_LLM_ENDPOINT/v1",
@@ -226,7 +219,14 @@
       "影视",
       "追剧",
       "盲派",
-      "知识库"
+      "知识库",
+      "搜一下",
+      "搜搜",
+      "搜索",
+      "最新",
+      "新闻",
+      "热搜",
+      "发布"
     ],
     "max_tokens": 8000,
     "engine": "builtin"

@@ -190,6 +190,53 @@ def search_videos(cfg, query: str) -> str:
         return f"影视搜索出错：{str(e)[:120]}。"
 
 
+# ================================================================ 联网搜索（anysearch，站方代理 AnySearch 服务）
+
+def _anysearch(cfg, command: str, args: dict) -> str:
+    """POST /api/anysearch（gate token 鉴权，与 cine 共用密语缓存）。
+    站方转发 AnySearch 的 MCP 接口，返回 {ok, text, command, configured}。"""
+    h = _hcfg(cfg)
+    if not h["enabled"]:
+        return "联网搜索未启用。"
+    token = _gate_token(h)
+    if token is None:
+        return ("联网搜索需要 PrivateGate 密语（配置 hub.cine_gate_answer）。"
+                "未配置前请自然告知用户搜不了。")
+    if token == "WRONG":
+        return "搜索密语不对或验证服务暂时不可用，请稍后再试。"
+    try:
+        from curl_cffi import requests as creq
+        r = creq.post(f"{h['base_url']}/api/anysearch",
+                      json={"command": command, "args": args},
+                      headers={"Authorization": f"Bearer {token}"},
+                      impersonate="chrome",
+                      timeout=max(h.get("timeout_s", 20), 30))
+        d = r.json()
+        if r.status_code == 200 and d.get("ok"):
+            return d.get("text") or "(搜索返回空结果)"
+        return (f"搜索暂时不可用（{r.status_code} {str(d.get('error', ''))[:80]}）。"
+                "请稍后再试，不要编造结果。")
+    except Exception as e:
+        return f"搜索出错：{str(e)[:120]}。请稍后再试。"
+
+
+def web_search(cfg, query: str, max_results: int = 5) -> str:
+    """全网搜索（AnySearch，经 antony.best 代理）。返回 LLM 友好的结果文本。"""
+    query = (query or "").strip()[:200]
+    if not query:
+        return "缺少搜索关键词。"
+    return _anysearch(cfg, "search",
+                      {"query": query, "max_results": max(1, min(10, max_results))})
+
+
+def web_extract(cfg, url: str) -> str:
+    """抓取指定网页正文（AnySearch extract）。搜索结果需要看详情页时用。"""
+    url = (url or "").strip()
+    if not re.match(r"^https?://", url):
+        return "url 必须是 http(s) 链接。"
+    return _anysearch(cfg, "extract", {"url": url[:2000]})
+
+
 # ================================================================ 盲派知识库（静态 JSON + 站方检索算法移植）
 
 def _normalize(text: str) -> str:

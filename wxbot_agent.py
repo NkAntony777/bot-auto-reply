@@ -37,7 +37,8 @@ DEFAULT_AGENT_CFG = {
     "allow_send_message": True,
     "route_keywords": ["查", "谁", "最近", "排盘", "占卜", "算一卦", "塔罗", "黄历", "八字", "紫微",
                         "六爻", "画一张", "画个", "画只", "画张", "画图", "生成一张", "生图",
-                        "搜书", "找书", "求书", "电影", "影视", "追剧", "盲派", "知识库"],
+                        "搜书", "找书", "求书", "电影", "影视", "追剧", "盲派", "知识库",
+                        "搜一下", "搜搜", "搜索", "最新", "新闻", "热搜", "发布"],
 }
 
 # 点名+问句路由的问句信号（中文无空格，只能子串匹配）
@@ -208,6 +209,21 @@ def _mk_kb_mangpai(ctx):
     return exec_fn
 
 
+def _mk_web_search(ctx):
+    def exec_fn(args):
+        import wxbot_hub
+        return wxbot_hub.web_search(ctx["cfg"], args.get("query") or "",
+                                     int(args.get("max_results", 5) or 5))
+    return exec_fn
+
+
+def _mk_web_extract(ctx):
+    def exec_fn(args):
+        import wxbot_hub
+        return wxbot_hub.web_extract(ctx["cfg"], args.get("url") or "")
+    return exec_fn
+
+
 def _mk_send_message(ctx):
     """预约发送：记录到 ctx['outbound']，由 poll 的稳定发送链路真正发出。"""
     def exec_fn(args):
@@ -286,6 +302,20 @@ _INTERNAL_TOOLS = [
                      "type": {"type": "string", "description": "限定条目类型：method/formula/table/concept/case/chapter，默认 all"}},
       "required": ["query"]},
      _mk_kb_mangpai),
+    ("web_search",
+     "联网搜索（AnySearch 全网搜，经 antony.best 代理）：实时新闻/价格/版本/政策等一切"
+     "模型知识截止日期之后的事实都必须先搜再答，不要凭记忆编时效信息。",
+     {"type": "object",
+      "properties": {"query": {"type": "string", "description": "搜索关键词（精炼，别整句）"},
+                     "max_results": {"type": "integer", "description": "结果条数 1-10，默认 5"}},
+      "required": ["query"]},
+     _mk_web_search),
+    ("web_extract",
+     "抓取指定 URL 的网页正文（搜索结果需要看详情时用）。",
+     {"type": "object",
+      "properties": {"url": {"type": "string", "description": "http(s) 链接"}},
+      "required": ["url"]},
+     _mk_web_extract),
 ]
 
 
