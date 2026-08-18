@@ -20,27 +20,29 @@ import time
 
 DEFAULTS = {
     "enabled": True,
-    "model": "stepaudio-2.5-tts",
-    # 阿廖沙人设：男生正太少年音（站主钦定），性格聪明帅气从容。vibrant-youth=
-    # 元气青年。instruction 是音高关键：实测不压年龄感会掉到 139Hz 大叔区，
-    # 压正太童声可到 212Hz 少年区（2026-08-18 F0 实测，见 _voice_test/）。
-    "voice": "vibrant-youth",
-    "instruction": "正太童声，10岁小男孩，声音清亮细，绝不是大叔音",
-    "response_format": "mp3",
-    "timeout_s": 120,
+    # 主通道：MiniMax t2a_v2 + clever_boy（聪明男孩，实测原厂 F0≈240Hz 天然正太区）
+    # 备通道：StepFun stepaudio-2.5-tts（同 LLM key）
+    # pitch_target_hz=0：不做升调后处理（站主要求原厂直出，处理会失真；
+    #   若将来要锁音高改为 218 即启用重采样升调）
+    "pitch_target_hz": 0.0,
     "keep_files": 40,
     "max_chars": 200,          # 单条语音文本上限（太长发不出去也没人听）
-    "pitch_target_hz": 218.0,  # 合成后实测基频低于此值则数字升调到目标（0=关闭）
-    # fallback：StepFun TTS 挂了走 MiniMax t2a_v2（原生 pitch 升调，时长不变；
-    # 实测 male-qn-qingse: pitch0=167Hz / pitch6=216Hz / pitch12=279Hz）
-    "fallback": {
-        "enabled": True,
+    "primary": {
+        "provider": "minimax",
         "model": "speech-2.8-hd",
-        "voice": "male-qn-qingse",
-        "pitch": 6,
+        "voice": "clever_boy",
+        "pitch": 0,                     # 原厂参数，不人为修改
+        "speed": 1.0,
         "api_key_env": "WXBOT_LLM_KEY",
         "base_url": "https://api.minimaxi.com",
-        "timeout_s": 60,
+        "timeout_s": 90,
+    },
+    "fallback": {
+        "provider": "stepfun",
+        "model": "stepaudio-2.5-tts",
+        "voice": "vibrant-youth",
+        "instruction": "正太童声，10岁小男孩，声音清亮细",
+        "timeout_s": 120,
     },
 }
 
@@ -110,51 +112,24 @@ def _ensure_pitch(pcm: bytes, target_hz: float):
     return buf.getvalue(), f0, ratio
 
 
-def _synthesize_stepfun(cfg, t, text, voice, instruction):
-    """主通道：StepFun stepaudio-2.5-tts（wav 输出，重采样升调兜底）。"""
-    from curl_cffi import requests as creq
-    key = cfg["llm"].get("api_key") or os.environ.get(cfg["llm"].get("api_key_env", ""))
-    if not key:
-        raise RuntimeError("no StepFun api key")
-    base_inst = instruction if instruction is not None else t["instruction"]
-    if float(t.get("pitch_target_hz", 0) or 0) > 0:
-        base_inst += "，语速稍慢"   # 升调会加速，提前补偿语速
-    r = creq.post(
-        "https://api.stepfun.com/step_plan/v1/audio/speech",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"model": t["model"], "input": text,
-              "voice": voice or t["voice"],
-              "instruction": base_inst,
-              "response_format": "wav"},
-        impersonate="chrome", timeout=int(t["timeout_s"]))
-    if r.status_code != 200:
-        raise RuntimeError(f"tts HTTP {r.status_code}: {r.text[:120]}")
-    if len(r.content) < 1000:
-        raise RuntimeError(f"tts 音频过短({len(r.content)}B)，可能合成失败")
-    content, f0, ratio = _ensure_pitch(r.content, float(t.get("pitch_target_hz", 0) or 0))
-    if f0:
-        note = f" -> pitch x{ratio:.2f} = {f0 * ratio:.0f}Hz" if ratio > 1.0 else " (in range)"
-        print(f"[tts:stepfun] F0={f0:.0f}Hz{note}")
-    return content
-
-
 def _synthesize_minimax(cfg, t, text):
-    """备通道：MiniMax t2a_v2（原生 pitch 升调，时长不变，音质比重采样好）。"""
-    fb = t.get("fallback") or {}
+    """主通道：MiniMax t2a_v2，原厂参数直出（clever_boy，pitch=0），
+    不做任何后处理（站主要求：处理会失真）。pitch_target_hz>0 时才启用升调。"""
+    p = t.get("primary") or {}
     from curl_cffi import requests as creq
-    key = os.environ.get(fb.get("api_key_env", "WXBOT_LLM_KEY"), "")
+    key = os.environ.get(p.get("api_key_env", "WXBOT_LLM_KEY"), "")
     if not key:
         raise RuntimeError("no MiniMax api key")
     r = creq.post(
-        f"{fb.get('base_url', 'https://api.minimaxi.com').rstrip('/')}/v1/t2a_v2",
+        f"{p.get('base_url', 'https://api.minimaxi.com').rstrip('/')}/v1/t2a_v2",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"model": fb.get("model", "speech-2.8-hd"), "text": text, "stream": False,
-              "voice_setting": {"voice_id": fb.get("voice", "male-qn-qingse"),
-                                "speed": 1.0, "vol": 1.0,
-                                "pitch": int(fb.get("pitch", 6))},
+        json={"model": p.get("model", "speech-2.8-hd"), "text": text, "stream": False,
+              "voice_setting": {"voice_id": p.get("voice", "clever_boy"),
+                                "speed": float(p.get("speed", 1.0)), "vol": 1.0,
+                                "pitch": int(p.get("pitch", 0))},
               "audio_setting": {"sample_rate": 24000, "bitrate": 128000,
                                 "format": "wav", "channel": 1}},
-        impersonate="chrome", timeout=int(fb.get("timeout_s", 60)))
+        impersonate="chrome", timeout=int(p.get("timeout_s", 90)))
     d = r.json()
     audio_hex = (d.get("data") or {}).get("audio", "")
     status = ((d.get("base_resp") or {}).get("status_code"))
@@ -163,17 +138,47 @@ def _synthesize_minimax(cfg, t, text):
     content = bytes.fromhex(audio_hex)
     if len(content) < 1000:
         raise RuntimeError("minimax tts 音频过短")
-    content, f0, ratio = _ensure_pitch(content, float(t.get("pitch_target_hz", 0) or 0))
-    if f0:
-        note = f" -> pitch x{ratio:.2f} = {f0 * ratio:.0f}Hz" if ratio > 1.0 else " (in range)"
-        print(f"[tts:minimax] F0={f0:.0f}Hz{note}")
+    target = float(t.get("pitch_target_hz", 0) or 0)
+    if target > 0:
+        content, f0, ratio = _ensure_pitch(content, target)
+        print(f"[tts:minimax] F0={f0:.0f}Hz" + (f" -> x{ratio:.2f}" if ratio > 1.0 else ""))
+    else:
+        print(f"[tts:minimax] 原厂直出（{p.get('voice', 'clever_boy')}）")
     return content
+
+
+def _synthesize_stepfun(cfg, t, text):
+    """备通道：StepFun stepaudio-2.5-tts。MiniMax 挂了才走。"""
+    fb = t.get("fallback") or {}
+    from curl_cffi import requests as creq
+    key = cfg["llm"].get("api_key") or os.environ.get(cfg["llm"].get("api_key_env", ""))
+    if not key:
+        raise RuntimeError("no StepFun api key")
+    r = creq.post(
+        "https://api.stepfun.com/step_plan/v1/audio/speech",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={"model": fb.get("model", "stepaudio-2.5-tts"), "input": text,
+              "voice": fb.get("voice", "vibrant-youth"),
+              "instruction": fb.get("instruction", "正太童声，10岁小男孩，声音清亮细"),
+              "response_format": "wav"},
+        impersonate="chrome", timeout=int(fb.get("timeout_s", 120)))
+    if r.status_code != 200:
+        raise RuntimeError(f"tts HTTP {r.status_code}: {r.text[:120]}")
+    if len(r.content) < 1000:
+        raise RuntimeError(f"tts 音频过短({len(r.content)}B)，可能合成失败")
+    target = float(t.get("pitch_target_hz", 0) or 0)
+    if target > 0:
+        content, f0, ratio = _ensure_pitch(r.content, target)
+        print(f"[tts:stepfun] F0={f0:.0f}Hz" + (f" -> x{ratio:.2f}" if ratio > 1.0 else ""))
+        return content
+    print(f"[tts:stepfun] 原厂直出（{fb.get('voice', 'vibrant-youth')}）")
+    return r.content
 
 
 def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
     """合成一条语音并落盘 wxbot_images/audio/gen_a_<hash>.wav。
-    主备双通道：StepFun 挂了走 MiniMax（tts.fallback）；音高按 pitch_target_hz
-    实测锁定。返回 (绝对路径, stem)；失败抛异常。"""
+    主备双通道：MiniMax（主，原厂参数直出）→ StepFun（备）。
+    pitch_target_hz=0 时全程不做升调处理。返回 (绝对路径, stem)；失败抛异常。"""
     t = _tcfg(cfg)
     if not t["enabled"]:
         raise RuntimeError("tts disabled in config")
@@ -186,13 +191,13 @@ def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
         raise RuntimeError("剥掉动作描写后没有可念的文本")
 
     try:
-        content = _synthesize_stepfun(cfg, t, text, voice, instruction)
+        content = _synthesize_minimax(cfg, t, text)
     except Exception as e:
         fb = t.get("fallback") or {}
         if not fb.get("enabled", True):
             raise
-        print(f"[tts] stepfun failed ({str(e)[:100]}), falling back to minimax")
-        content = _synthesize_minimax(cfg, t, text)
+        print(f"[tts] minimax failed ({str(e)[:100]}), falling back to stepfun")
+        content = _synthesize_stepfun(cfg, t, text)
 
     d = audio_dir(cfg)
     os.makedirs(d, exist_ok=True)

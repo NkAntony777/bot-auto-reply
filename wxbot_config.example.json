@@ -262,22 +262,25 @@
   },
   "tts": {
     "enabled": true,
-    "model": "stepaudio-2.5-tts",
-    "voice": "vibrant-youth",
-    "instruction": "正太童声，10岁小男孩，声音清亮细，绝不是大叔音",
-    "response_format": "mp3",
-    "timeout_s": 120,
+    "pitch_target_hz": 0,
     "keep_files": 40,
     "max_chars": 200,
-    "pitch_target_hz": 218.0,
-    "fallback": {
-      "enabled": true,
+    "primary": {
+      "provider": "minimax",
       "model": "speech-2.8-hd",
-      "voice": "male-qn-qingse",
-      "pitch": 6,
+      "voice": "clever_boy",
+      "pitch": 0,
+      "speed": 1.0,
       "api_key_env": "WXBOT_LLM_KEY",
       "base_url": "https://api.minimaxi.com",
-      "timeout_s": 60
+      "timeout_s": 90
+    },
+    "fallback": {
+      "provider": "stepfun",
+      "model": "stepaudio-2.5-tts",
+      "voice": "vibrant-youth",
+      "instruction": "正太童声，10岁小男孩，声音清亮细",
+      "timeout_s": 120
     }
   }
 }
