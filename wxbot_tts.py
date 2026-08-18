@@ -175,6 +175,22 @@ def _synthesize_stepfun(cfg, t, text):
     return r.content
 
 
+def _strip_meow(text: str) -> str:
+    """语音朗读文本去猫化（站主约束：语音里不说"喵"语气词，文字人设不受影响）。
+    顺序：先把"本喵/喵爷/喵呜"等自称换成"我"（否则剥语气词会念出"本"字），
+    再剥所有"喵"语气词（句中/句尾/句首都可能），最后清理孤标点与重复。"""
+    text = re.sub(r"本喵|喵爷|喵呜", "我", text)
+    text = re.sub(r"喵+", "", text)
+    text = re.sub(r"\s+", " ", text)
+    # 清理孤悬标点与重复标点
+    text = re.sub(r"我(我+)", "我", text)
+    text = re.sub(r"[，,、]\s*[。！？!?]", "。", text)
+    text = re.sub(r"^[，,、。；;~…]+", "", text.strip())
+    text = re.sub(r"[，,、]\s*$", "", text.strip())
+    text = re.sub(r"我[，,]\s*我", "我", text)  # "喵呜，大家好，我是" → "我，我是"类
+    return text.strip()
+
+
 def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
     """合成一条语音并落盘 wxbot_images/audio/gen_a_<hash>.wav。
     主备双通道：MiniMax（主，原厂参数直出）→ StepFun（备）。
@@ -187,8 +203,10 @@ def synthesize(cfg, text: str, voice: str = None, instruction: str = None):
         raise RuntimeError("text is empty")
     # 括号动作描写（猫设回复常有）念出来很怪，剥掉
     text = re.sub(r"[（(][^）)]{1,20}[）)]", "", text).strip()
+    # 语音不说喵语气词（自称同步换"我"）
+    text = _strip_meow(text)
     if not text:
-        raise RuntimeError("剥掉动作描写后没有可念的文本")
+        raise RuntimeError("剥掉动作描写和语气词后没有可念的文本")
 
     try:
         content = _synthesize_minimax(cfg, t, text)
