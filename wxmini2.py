@@ -796,60 +796,84 @@ def _chat_content_px(hwnd: int) -> int:
 
 def _find_tray_wechat_button():
     """在任务栏托盘找微信图标按钮，返回 (x, y) 或 None。
-    Win11 图标可能在主托盘，也可能藏在溢出弹窗（"^" chevron）里——
-    主托盘找不到就点开溢出弹窗再找（弹窗是独立顶层 XamlIsland 窗口）。"""
+    必须精确匹配名字（'微信'/'WeChat'）：任务栏固定/运行按钮叫
+    '微信 - N 个运行窗口'，点它只是最小化/聚焦，不能触发重渲染；
+    真正的托盘图标才是个开关（隐藏/唤出，用户实测可复活渲染）。
+    Win11 下图标常藏在溢出弹窗（'^' chevron，独立顶层
+    TopLevelWindowForOverflowXamlIsland 窗口）里——先开弹窗在弹窗内找，
+    找不到再退主托盘浅搜（2026-08-18 实测修好点错图标的问题）。"""
     try:
         import uiautomation as auto
     except ImportError:
         return None
+
+    def is_tray_icon(ctrl):
+        return (ctrl.Name or '').strip() in ('微信', 'WeChat')
+
+    def find_in(ctrl, depth):
+        try:
+            if is_tray_icon(ctrl):
+                return ctrl
+            if depth <= 0:
+                return None
+            for c in ctrl.GetChildren():
+                hit = find_in(c, depth - 1)
+                if hit is not None:
+                    return hit
+        except Exception:
+            pass
+        return None
+
+    def center(btn):
+        r = btn.BoundingRectangle
+        if r.right > r.left and r.bottom > r.top:
+            return (r.left + r.right) // 2, (r.top + r.bottom) // 2
+        return None
+
     try:
         bar = auto.GetRootControl().Control(searchDepth=1, ClassName='Shell_TrayWnd')
         if not bar.Exists(1, 0.2):
             return None
+        import ctypes.wintypes as wt
+        U = C.windll.user32
+        popups = []
 
-        def walk(ctrl, depth):
-            if depth <= 0:
-                return None
-            for c in ctrl.GetChildren():
-                name = c.Name or ''
-                if ('微信' in name) or ('WeChat' in name):
-                    return c
-                hit = walk(c, depth - 1)
-                if hit is not None:
-                    return hit
-            return None
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+        def _cb(h, lp):
+            if U.IsWindowVisible(h):
+                cls = ctypes.create_unicode_buffer(128)
+                U.GetClassNameW(h, cls, 128)
+                if cls.value == 'TopLevelWindowForOverflowXamlIsland':
+                    popups.append(h)
+            return True
 
-        def center(btn):
-            r = btn.BoundingRectangle
-            if r.right > r.left and r.bottom > r.top:
-                return (r.left + r.right) // 2, (r.top + r.bottom) // 2
-            return None
-
-        btn = walk(bar, 6)
+        # 1) 溢出弹窗优先。chevron 是开关：弹窗已开时再点会关掉——
+        #    先枚举确认弹窗不在，才点 '^' 打开
+        U.EnumWindows(_cb, 0)
+        if not popups:
+            import pyautogui
+            for chev_name in ('显示隐藏的图标', 'Notification Chevron', '更多图标'):
+                chev = bar.Control(Name=chev_name, searchDepth=6)
+                if chev.Exists(0.5, 0.1):
+                    pos = center(chev)
+                    if pos:
+                        pyautogui.click(pos[0], pos[1], duration=0.08)
+                        time.sleep(0.9)
+                        break
+            popups.clear()
+            U.EnumWindows(_cb, 0)
+        for h in popups:
+            btn = find_in(auto.ControlFromHandle(h), 6)
+            if btn is not None:
+                pos = center(btn)
+                if pos:
+                    return pos
+        # 2) 兜底：主托盘浅搜（图标直接可见时；精确名，不会误中任务栏按钮）
+        btn = find_in(bar, 6)
         if btn is not None:
             pos = center(btn)
             if pos:
                 return pos
-        # 主托盘没有 → 点开溢出弹窗（显示隐藏的图标）再找
-        for chev_name in ('显示隐藏的图标', 'Notification Chevron', '更多图标'):
-            chev = bar.Control(Name=chev_name, searchDepth=6)
-            if chev.Exists(0.5, 0.1):
-                pos = center(chev)
-                if pos:
-                    import pyautogui
-                    pyautogui.click(pos[0], pos[1], duration=0.08)
-                    time.sleep(0.8)
-                    break
-        # 溢出弹窗是顶层窗口：从桌面根找（先精确名，再深搜）
-        root = auto.GetRootControl()
-        cand = root.Control(Name='微信', searchDepth=8)
-        if cand.Exists(1.5, 0.2):
-            pos = center(cand)
-            if pos:
-                return pos
-        btn = walk(root, 6)
-        if btn is not None:
-            return center(btn)
     except Exception as e:
         print(f"[wxmini2] _find_tray_wechat_button error: {e}")
     return None
@@ -866,8 +890,12 @@ def revive_via_tray(hwnd: int) -> bool:
         import pyautogui
         pyautogui.click(pos[0], pos[1], duration=0.1)
         time.sleep(1.2)
-        # 若窗口被隐藏，再点一次唤出
+        # 若窗口被隐藏，再点一次唤出（弹窗点完即关，必须重新找一次图标）
         if not C.windll.user32.IsWindowVisible(hwnd):
+            pos = _find_tray_wechat_button()
+            if not pos:
+                print("[wxmini2] tray icon lost after hide toggle")
+                return False
             pyautogui.click(pos[0], pos[1], duration=0.1)
             time.sleep(1.0)
         force_foreground(hwnd)
@@ -1157,24 +1185,59 @@ def quote_reply(hwnd: int, text: str) -> bool:
     print("[wxmini2] quote_reply: 暂未实现")
     return False
 
-def restart_wechat() -> int:
-    """重启微信：渲染进程挂死（整窗空白、点击无效）时的自愈手段。
-    强杀 Weixin.exe → 重新启动 → 等主窗口出现且有内容。返回新 hwnd。"""
-    import subprocess, glob
-    print("[wxmini2] restarting WeChat...")
-    subprocess.run(["taskkill", "/F", "/IM", "Weixin.exe"],
-                   capture_output=True)
-    time.sleep(2.0)
+SIDEBAR_ALIVE_TH = 2000   # sidebar_alive_px 活性阈值：健康 26k~40k，死/登录页 <200
+
+
+def sidebar_alive_px(hwnd: int) -> int:
+    """侧边栏"活性"分值：深色像素数 × 行起伏度。已登录主界面有头像+会话
+    文字（行剖面起伏大）；扫码/确认登录页/渲染死侧边栏空白或只剩边框线
+    （2026-08-18 实测：纯边框线就有 ~7800 暗像素，单纯计数会误判已登录）。
+    返回 dark*min(1, rowstd/10)，>SIDEBAR_ALIVE_TH 视为活着。"""
+    import numpy as np
+    try:
+        _ensure_fg(hwnd)
+        img = _grab_window(hwnd)
+        W, H = img.size
+        if W < 100:
+            return 0
+        crop = img.crop((0, int(H * LIST_Y1), int(W * LIST_X2), int(H * LIST_Y2)))
+        arr = np.asarray(crop.convert("L"))
+        dark = int((arr < 160).sum())
+        rowstd = float((arr < 160).sum(axis=1).std())
+        return int(dark * min(1.0, rowstd / 10.0))
+    except Exception:
+        return 0
+
+
+def _handle_login_page(hwnd: int, timeout: float = 20.0) -> bool:
+    """重启后若停在登录页：确认页（头像+「进入微信」按钮）点按钮自动登录；
+    扫码页无法自动化，返回 False。登录成功判定 = 侧边栏出现内容。"""
+    import pyautogui
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if sidebar_alive_px(hwnd) > SIDEBAR_ALIVE_TH:
+            return True
+        l, t, r, b, w, h = get_window_rect(hwnd)
+        # 「进入微信」按钮在页面中下部；扫码页点上无害
+        pyautogui.click(l + w // 2, t + int(h * 0.78), duration=0.1)
+        time.sleep(3.0)
+    return sidebar_alive_px(hwnd) > SIDEBAR_ALIVE_TH
+
+
+def _find_wechat_exe() -> str:
+    import glob
     exe = r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe"
     if not os.path.exists(exe):
         hits = glob.glob(r"C:\Program Files*\Tencent\Weixin\Weixin.exe")
         if not hits:
             raise RuntimeError("Weixin.exe not found")
         exe = hits[0]
-    subprocess.Popen([exe], cwd=os.path.dirname(exe))
-    # 等主窗口
-    deadline = time.time() + 90
-    hwnd = 0
+    return exe
+
+
+def _wait_main_window(timeout: float) -> int:
+    """等一个可见非最小化的微信主窗口出现，返回 hwnd 或 0。"""
+    deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(2.0)
         try:
@@ -1183,10 +1246,36 @@ def restart_wechat() -> int:
             wins = []
         for h, vis, _ in wins:
             if vis and not ctypes.windll.user32.IsIconic(h):
-                hwnd = h
-                break
-        if hwnd:
-            break
+                return h
+    return 0
+
+
+def restart_wechat() -> int:
+    """重启微信：渲染进程挂死（整窗空白、点击无效）时的自愈手段。
+    **优雅退出优先**：对主窗口发 WM_CLOSE 再启动新实例——保住登录态
+    （taskkill /F 会破坏会话文件触发扫码验证，2026-08-18 实测；
+    优雅关闭后新实例直接进主界面，子进程残留无妨）。
+    优雅路径 60s 没起窗才退回强杀重来。登录确认页自动点「进入微信」，
+    扫码页无法自动化则抛错。返回新 hwnd。"""
+    import subprocess
+    exe = _find_wechat_exe()
+    print("[wxmini2] restarting WeChat (graceful close first)...")
+    try:
+        for h, vis, _ in _enum_wechat_windows():
+            if vis:
+                C.windll.user32.PostMessageW(h, 0x0010, 0, 0)   # WM_CLOSE
+    except Exception:
+        pass
+    time.sleep(3.0)
+    subprocess.Popen([exe], cwd=os.path.dirname(exe))
+    hwnd = _wait_main_window(60)
+    if not hwnd:
+        # 优雅路径失败 → 强杀重来（最后手段，可能触发重新登录）
+        print("[wxmini2] graceful path failed, falling back to taskkill")
+        subprocess.run(["taskkill", "/F", "/IM", "Weixin.exe"], capture_output=True)
+        time.sleep(2.0)
+        subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        hwnd = _wait_main_window(90)
     if not hwnd:
         raise RuntimeError("WeChat window did not come back (login needed?)")
     # 等窗口渲染出内容（登录页/主界面都算）
@@ -1197,12 +1286,18 @@ def restart_wechat() -> int:
             import numpy as np
             arr = np.asarray(img.convert("L"))
             if int((arr < 130).sum()) > 3000:
-                print(f"[wxmini2] WeChat restarted, hwnd={hwnd}")
-                return hwnd
+                break
         except Exception:
             pass
         time.sleep(2.0)
-    print("[wxmini2] window up but content not rendering yet")
+    else:
+        print("[wxmini2] window up but content not rendering yet")
+    # 登录页处理：多次强杀后微信常要求确认登录（2026-08-18 实测）
+    if sidebar_alive_px(hwnd) < SIDEBAR_ALIVE_TH:
+        print("[wxmini2] login page detected, trying auto-confirm...")
+        if not _handle_login_page(hwnd):
+            raise RuntimeError("WeChat is on QR-login page; manual scan required")
+    print(f"[wxmini2] WeChat restarted, hwnd={hwnd}")
     return hwnd
 
 # ============== 健康检查 ==============
