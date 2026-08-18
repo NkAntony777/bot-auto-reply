@@ -231,5 +231,12 @@
     "timeout_s": 120,
     "max_side": 1024,
     "keep_files": 40
+  },
+  "mcp": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8766,
+    "run_ttl_s": 1800,
+    "direct_send_gap_s": 60
   }
 }

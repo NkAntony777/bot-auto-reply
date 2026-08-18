@@ -109,17 +109,18 @@ fixture 集（目标 ≥20 条，覆盖：八字/塔罗/查群史/画图/网关�
 快路径样例），落 `_fixtures/` + `run_fixtures.py` 重放脚本。以后每次框架升级
 重放一遍——顺手解决"无评测"痛点。
 
-### 阶段 B：工具层 MCP 化（1-2 晚，**先定 ctx 状态方案再动手**）
-- **前置决策（评审提出）**：MCP server 是无状态 per-call 的，而现有工具依赖
-  每 run 的 ctx（conversation/username/sent_count/img_stem）。两个选项：
-  a) ctx 变工具参数（模型多传几个参数，简单但 prompt 变长）；
-  b) server 侧维护会话态（run_id → ctx 映射，语义最像现在）。
-  倾向 b，但要在设计稿里定死再开工
-- **预算语义必须在 MCP 层同样强制**："每入站 1 次 send_message"不能因为换了
-  入口（MCP/HTTP）就被绕过——预算计数放在工具实现本体里，随 ctx 走
-- `wxbot_mcp.py`：FastMCP 包 5 个内部工具 + 网关转发 + send_image/send_text
+### 阶段 B：工具层 MCP 化（1-2 晚，**先定 ctx 状态方案再动手**）—— ✅ 已完工 2026-08-18
+- **ctx 状态方案（定案）**：server 侧会话态——`begin_run(conversation)` → run_id →
+  ctx（TTL 30min），`end_run` 返回收口摘要（outbound/img_stem/计数）。只读查询
+  无状态直传 conversation；预算检查在工具实现层（换入口绕不过）
+- **预算语义已在 MCP 层强制**：send_message 每 run 1 次（实测第 2 次被拦）、
+  tool_budget 计数、操作员直发 send_text/send_image 60s 限速
+- 交付 `wxbot_mcp.py`：12 工具（run 生命周期 2 + 只读查询 4 + 预算类 3 + 操作员直发 2 + 目录 1），
+  streamable-http 绑 127.0.0.1:8766；客户端集成测试全绿（含真实网关塔罗、
+  实弹 send_text DB 确认）
+- ZCode 接入：用户级 mcp 设置加 `{"mcpServers": {"wxbot": {"type": "http",
+  "url": "http://127.0.0.1:8766/mcp"}}}`
 - wxapi HTTP 与 MCP server 并存（前者给脚本/curl，后者给 agent 客户端）
-- 顺带收益：ZCode 里就能直接调 bot 工具调试（我现在调试要跑 python -c，以后 /mcp 直调）
 
 ### 阶段 C：Pi spike（可选，严格 timebox 1-2 晚）
 - pi RPC 模式 + extension 调 wxapi HTTP，跑通一次"排八字并发群里"
