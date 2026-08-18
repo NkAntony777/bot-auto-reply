@@ -1216,7 +1216,7 @@ def poll_once(cfg, state, hwnd):
                         import wxbot_tts
                         adir = wxbot_tts.audio_dir(cfg)
                         for fn in os.listdir(adir) if os.path.isdir(adir) else []:
-                            if fn.startswith(astem) and fn.endswith(".mp3"):
+                            if fn.startswith(astem) and fn.endswith((".mp3", ".wav")):
                                 apath = os.path.join(adir, fn)
                                 break
                     if apath:
