@@ -20,7 +20,7 @@ import time
 
 DEFAULTS = {
     "enabled": True,
-    # 主通道：MiniMax t2a_v2 + clever_boy（聪明男孩，实测原厂 F0≈240Hz 天然正太区）
+    # 主通道：MiniMax t2a_v2 + chunzhen_xuedi（纯真学弟，站主试听钦定 2026-08-18）
     # 备通道：StepFun stepaudio-2.5-tts（同 LLM key）
     # pitch_target_hz=0：不做升调后处理（站主要求原厂直出，处理会失真；
     #   若将来要锁音高改为 218 即启用重采样升调）
@@ -30,7 +30,7 @@ DEFAULTS = {
     "primary": {
         "provider": "minimax",
         "model": "speech-2.8-hd",
-        "voice": "clever_boy",
+        "voice": "chunzhen_xuedi",
         "pitch": 0,                     # 原厂参数，不人为修改
         "speed": 1.0,
         "api_key_env": "WXBOT_LLM_KEY",
@@ -113,7 +113,7 @@ def _ensure_pitch(pcm: bytes, target_hz: float):
 
 
 def _synthesize_minimax(cfg, t, text):
-    """主通道：MiniMax t2a_v2，原厂参数直出（clever_boy，pitch=0），
+    """主通道：MiniMax t2a_v2，原厂参数直出（chunzhen_xuedi，pitch=0），
     不做任何后处理（站主要求：处理会失真）。pitch_target_hz>0 时才启用升调。"""
     p = t.get("primary") or {}
     from curl_cffi import requests as creq
@@ -124,7 +124,7 @@ def _synthesize_minimax(cfg, t, text):
         f"{p.get('base_url', 'https://api.minimaxi.com').rstrip('/')}/v1/t2a_v2",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         json={"model": p.get("model", "speech-2.8-hd"), "text": text, "stream": False,
-              "voice_setting": {"voice_id": p.get("voice", "clever_boy"),
+              "voice_setting": {"voice_id": p.get("voice", "chunzhen_xuedi"),
                                 "speed": float(p.get("speed", 1.0)), "vol": 1.0,
                                 "pitch": int(p.get("pitch", 0))},
               "audio_setting": {"sample_rate": 24000, "bitrate": 128000,
@@ -143,7 +143,7 @@ def _synthesize_minimax(cfg, t, text):
         content, f0, ratio = _ensure_pitch(content, target)
         print(f"[tts:minimax] F0={f0:.0f}Hz" + (f" -> x{ratio:.2f}" if ratio > 1.0 else ""))
     else:
-        print(f"[tts:minimax] 原厂直出（{p.get('voice', 'clever_boy')}）")
+        print(f"[tts:minimax] 原厂直出（{p.get('voice', 'chunzhen_xuedi')}）")
     return content
 
 
