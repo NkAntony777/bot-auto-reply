@@ -47,6 +47,7 @@
 | `wxbot_agent.py` | **agent 层（Phase 1）**：混合路由（快/慢双路径）、tools 多轮循环（max_rounds=5 / tool_budget=8 双预算）、内部工具 4 个（查群史/成员/统计/预约发送）+ antony.best 网关工具注入、send_message 每入站 1 次限额 + 内容过滤 |
 | `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
 | `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
+| `wxapi.py` | **操作 API 层**（2026-08-18）：固定坐标快路径 open_chat（DB 行号+标题模板验证，OCR 退兜底）、剪贴板发图/发文件（CF_DIB/CF_HDROP）、HTTP API（127.0.0.1+token+单飞锁）、CLI 直调；详见 `docs/WXAPI.md` |
 | `wechatauto`（venv 包） | 微信 4.x 解密库：进程内存提取 SQLCipher key、库解密、WAL 增量合并、消息/会话查询 |
 | `personas/*.md` | 人格定义（当前主力 `neko_cow.md`＝阿廖沙） |
 | `wxbot_state.json` | 状态：每会话已见指纹、已回复列表、发送记录、回复时间戳 |
@@ -178,7 +179,9 @@ send_message）+ antony.best 网关 13 个玄学工具（`antony_` 前缀，seed
 
 - 发送仍需真实鼠标键盘事件 + 微信前台可见（视觉方案本质），已用"等空闲+停靠+还焦点"把干扰降到最低
 - 微信渲染挂死无法根治，靠三级自愈兜底（最坏重启约 90 秒）
-- `send_image` / `send_sticker` / `send_emoji` / `quote_reply` 是占位 stub；贴纸目录
+- **发图/发文件已可用（wxapi）**：`wxapi.py` 的 `send_image`/`send_file`（剪贴板
+  粘贴，零弹窗）+ HTTP/CLI 封装，DB 类型确认；`send_sticker` / `send_emoji` /
+  `quote_reply` 在 wxmini2 仍是占位 stub；贴纸目录
   `wxbot_images/stickers/catalog.json` 不存在时会打无害告警
 - 对方发图目前只传占位文本给 LLM（DB 拿不到气泡截图，识图链路待接）
 - state 的 seen 指纹以"最新消息"为键：批量离线消息涌来时只处理最新一条（设计取舍，防刷屏）

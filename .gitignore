@@ -24,3 +24,17 @@ Thumbs.db
 .venv/
 __pycache__/
 *.pyc
+
+# wxapi 运行产物（token/标定/模板缓存均为本机态，不入库）
+wxapi_config.json
+wxapi_layout.json
+wxapi_titles/
+_wxapi_*/
+# 排查用调试截图（临时产物）
+_row_*.png
+_tray_*.png
+_wxapi_*.png
+fresh_*.png
+full_window_*.png
+_wxapi_e2e.log
+_wxapi_server.log
