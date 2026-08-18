@@ -18,12 +18,18 @@
 ┌─────────────────────────── 每轮 poll（默认 5s）───────────────────────────┐
 │                                                                          │
 │  微信本地库 (SQLCipher)                LLM                               │
-│  session.db ──→ db_sessions() ──→ 变化检测(最新消息指纹) ──→ llm_reply() │
-│  message_*.db ─→ read_chat_db() ─→ 判边/判群/群员昵称 ──→ 人设/上下文    │
+│  session.db ──→ db_sessions() ──→ 变化检测(最新消息指纹) ──┐             │
+│  message_*.db ─→ read_chat_db() ─→ 判边/判群/群员昵称 ──┤             │
+│        │                                                ▼              │
+│        │ wechatauto.WeChatDB              wxbot_agent.reply_dispatch() │
+│        │ (进程内存提key+解密+WAL增量合并)   ├─ 快路径: llm_reply()      │
+│        │                                  │   (闲聊, 2-5s 体验不变)    │
+│        │                                  └─ 慢路径: agent_reply()     │
+│        │                                     (tools 循环: 查群史/统计/  │
+│        │                                      antony.best 13 玄学工具/  │
+│        │                                      send_message 预约发送)    │
 │        │                                  │                              │
-│        │ wechatauto.WeChatDB              ▼                              │
-│        │ (进程内存提key+解密+WAL增量合并)   回复文本(可分多句)             │
-│        │                                  │                              │
+│        │                                  ▼                              │
 │  ┌─────┴────────── 发送（仅此时碰鼠标键盘）──────────────────┐            │
 │  │ 等用户键鼠空闲 → 窗口停靠右下角 → 侧边栏点击开会话        │            │
 │  │ → 渲染自愈(点击唤醒→托盘复活→重启微信)                    │            │
@@ -38,7 +44,9 @@
 | 文件 | 职责 |
 |---|---|
 | `wxbot.py` | 主守护：DB 驱动轮询、回复策略（冷却/免打扰/@门控/unlimited 群）、人格注入、分句发送、LLM fallback 与全局退避、日志 Tee |
-| `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启 |
+| `wxbot_agent.py` | **agent 层（Phase 1）**：混合路由（快/慢双路径）、tools 多轮循环（max_rounds=5 / tool_budget=8 双预算）、内部工具 4 个（查群史/成员/统计/预约发送）+ antony.best 网关工具注入、send_message 每入站 1 次限额 + 内容过滤 |
+| `wxbot_gateway.py` | antony.best 工具网关客户端：目录缓存、相关性挑选（路由信号）、curl_cffi/urllib 双通道、调用永不抛异常 |
+| `wxmini2.py` | 视觉自动化：窗口管理（停靠/前台）、ImageGrab 截图、RapidOCR、侧边栏定位点击、发送验证链、渲染三级自愈、微信重启、**zstd 消息解压补丁** |
 | `wechatauto`（venv 包） | 微信 4.x 解密库：进程内存提取 SQLCipher key、库解密、WAL 增量合并、消息/会话查询 |
 | `personas/*.md` | 人格定义（当前主力 `neko_cow.md`＝阿廖沙） |
 | `wxbot_state.json` | 状态：每会话已见指纹、已回复列表、发送记录、回复时间戳 |
@@ -56,6 +64,8 @@
 | PrintWindow(pw_shot) 截图 | 对输入框等独立渲染层是**盲区**（截出空白），验证全错 | 验证类截图一律 **ImageGrab（屏幕截取）**；pw_shot 仅用于调试 |
 | OCR 文字匹配做发送验证 | 小窗口误字率高（`叫→啪`、`廖→膝`），一半字读错 | **像素判粘贴**（暗像素增量，阈值随文本长度缩放）+ **DB 精确文本匹配判送达**（零 OCR 依赖） |
 | 不检查 send_text 返回值 | 谎报成功，state 记假账 | poll 检查返回值；部分成功也算完成（防重复回复） |
+| wechatauto 读长/多行消息得 `[文本]` 占位符 | 微信 4.x 会把长/多行文本、表情 XML 的 `message_content` **zstd 压缩**存储；`_extract_text_from_blob` 只是跳头找明文的启发式，压实的 blob 解不出 → 读不到内容、发送确认误报失败 | wxmini2 猴子补丁 `_friendly_content`：文本类先真解压（`zstandard` 包）；表情/图片保持占位符语义 |
+| 停靠虚拟屏后侧边栏定位偶发 miss | 有新消息的会话顶到列表第一行，固定 `LIST_Y1=0.10` 上边距在小窗口（约 1000px 高）把首行群名切掉，OCR 只看到第二行预览 | `_find_sidebar_row` 常规裁剪 miss 后用 `Y1=0.02` 扩展裁剪再扫一遍 |
 
 ## 4. 微信 4.x 踩坑实录（时间换来的，改代码前先读）
 
@@ -128,6 +138,15 @@ tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终�
 换主模型：改 `llm.model`（`step-3.5-flash` 思考更短更快、稍直白）。key 支持内联 `llm.api_key`
 或 `api_key_env` 环境变量；fallback 同理（`fallbacks[].api_key / api_key_env`）。
 
+**agent 层（Phase 1，2026-08-18 上线）**：`wxbot_agent.reply_dispatch` 混合路由——
+闲聊走原快路径（延迟不变）；网关相关性命中/路由关键词/点名问句走 `agent_reply`
+tools 循环（StepFun 与 MiniMax 的 tool_calls 均为标准 OpenAI 格式，已实测）。
+工具：内部 4 个（query_chat_history / query_member_info / query_group_stats /
+send_message）+ antony.best 网关 13 个玄学工具（`antony_` 前缀，seed 自动按
+消息指纹注入保证同问同答）。send_message 是**预约发送**（每入站 1 次限额 +
+内容过滤），真正发送仍走 poll 的 delay/分句/发送链，循环内不碰窗口。
+依赖新增：`pip install zstandard`（微信 4.x zstd 压缩消息解压）。
+
 ## 7. 配置速查（wxbot_config.json）
 
 - `reply.unlimited_groups`：免 @ 无条件回复的群（**必须与 DB 全名完全一致**）
@@ -135,6 +154,10 @@ tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终�
 - `reply.context_messages`：每会话上下文条数（default + 按群覆盖）
 - `reply.deny_contacts`：文件传输助手/微信团队等内置入口，绝不回复
 - `personas.behaviors`：@/表情/贴纸/图片/引用 的 0~1 频率（发送时掷骰子节流；贴纸/表情/图片发送当前为 stub，日志会提示跳过）
+- `agent.*`：agent 层开关与预算——`enabled`（总开关）、`max_rounds`（LLM 轮数，
+  默认 5）、`tool_budget`（工具执行次数，默认 8）、`allow_send_message`（一键关掉
+  自主发送）、`route_keywords`（慢路径触发词，跑一周再调）
+- `gateway.*`：antony.best 工具网关（入口/token 文件/超时/每消息最多注入工具数）
 - `state_file`：状态持久化（seen 指纹 / replied / sent）
 
 ## 8. 已知限制
@@ -146,8 +169,10 @@ tail -f wxbot_run.log                        # 运行日志（_Tee 双写，终�
   托盘查找已支持 Win11 溢出弹窗（chevron 点开后再找，见 `_find_tray_wechat_button`）。
   根治建议（可选手动一次）：设置→显示→选中虚拟屏→缩放改 125%，与主屏一致后
   跨屏不再触发 WM_DPICHANGED。
-- **虚拟显示器不保证跨重启持久**：Amyuni IDD 在重启/驱动宿主回收后可能掉线，
-  需管理员重新激活。已提供 `enable_virtual_display.bat`（右键管理员运行）；
+- **虚拟显示器不保证跨重启持久**：Amyuni IDD 在重启/驱动宿主回收后可能掉线。
+  **实测（2026-08-18）：驱动装好之后，重新挂载 `deviceinstaller64 enableidd 1`
+  不需要管理员权限**（只有首次装驱动要 UAC）；重挂后用 `enableidd 0` 再
+  `enableidd 1` 可清掉多挂的屏。已提供 `enable_virtual_display.bat`；
   bot 检测不到副屏时自动退回主屏右下角停靠模式，功能不中断。
 
 

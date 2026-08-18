@@ -1,6 +1,6 @@
 # 任务书：Phase 1 —— Tool-Calling Agent 循环
 
-> 开工日期：待定｜预计工作量：1 晚
+> 开工日期：2026-08-18｜状态：**已完工，A1-A7 全过**（实弹记录见 git log）
 > 上游依赖：全部就绪（网关客户端 ✅ 输入僵死修复 ✅ 虚拟屏方案 ✅）
 > 总路线：docs/AGENT_ROADMAP.md ｜ 架构现状：docs/PROJECT.md
 
@@ -139,9 +139,18 @@ def reply_dispatch(cfg, conversation, inbound, ctx_lines, is_group) -> str | Non
 
 ## 6. 交付物清单
 
-- [ ] `wxbot_agent.py`（注册表/循环/路由/预算）
-- [ ] `wxbot.py` 调用点替换 + `--once` 验证
-- [ ] 配置段 + example 同步
-- [ ] 验收 A1-A7 全过（日志留档 `wxbot_run.log`）
-- [ ] docs/PROJECT.md 架构图补一笔（快/慢双路径）
-- [ ] git commit + push
+- [x] `wxbot_agent.py`（注册表/循环/路由/预算）
+- [x] `wxbot.py` 调用点替换 + `--once` 验证
+- [x] 配置段 + example 同步
+- [x] 验收 A1-A7 全过（A1 查群史/A2 排八字已实弹发到群里并有群友回应，A3 seed 复现，
+      A4 快路径 4.9s，A5 预算拦截，A6 拔网关优雅降级，A7 还屏可点击）
+- [x] docs/PROJECT.md 架构图补一笔（快/慢双路径）
+- [x] git commit + push
+
+## 施工中额外发现并修复的两个坑（不在原任务书内）
+
+1. **微信 4.x zstd 压缩消息**：长/多行文本的 `message_content` 是 zstd 压缩 blob，
+   wechatauto 解不出退化成 `[文本]` 占位符 → 读不到自己发的消息、发送确认误报失败。
+   wxmini2 加 `_patch_friendly_content` 猴子补丁（`pip install zstandard`）。
+2. **小窗口侧边栏首行被裁**：虚拟屏停靠后窗口约 1000px 高，`LIST_Y1=0.10`
+   把置顶会话的群名行切掉 → `_find_sidebar_row` 加 Y1=0.02 扩展裁剪兜底。

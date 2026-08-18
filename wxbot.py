@@ -21,6 +21,7 @@ import wxbot_files
 import wxbot_memory
 import wxbot_context
 import wxbot_search
+import wxbot_agent
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "wxbot_config.json")
@@ -112,6 +113,8 @@ DEFAULT_CONFIG = {
     },
     "state_file": os.path.join(BASE, "wxbot_state.json"),
     "own_nicknames": ["爱而不恨"]
+    # agent 段的默认值在 wxbot_agent.DEFAULT_AGENT_CFG（避免循环导入），
+    # 配置文件缺该段时由 wxbot_agent._acfg 兜底。
 }
 
 def _deep_merge(base, override):
@@ -554,17 +557,13 @@ def in_quiet_hours(qh):
         return start <= now < end
     return now >= start or now < end
 
-def llm_reply(cfg, conversation, inbound_text, context=None, is_group=True):
-    """Generate a reply with an OpenAI-compatible chat completions API.
+def system_prompt_for(cfg, conversation, inbound_text, is_group):
+    """组装并缓存 system prompt（llm_reply 快路径与 wxbot_agent 慢路径共用一套缓存）。
 
     输入缓存：system 前缀（base.md + 能力清单 + 行为偏好 + 人格 + 记忆）按
     (人格文件mtime, 记忆mtime, 贴纸目录mtime, model) 组合键缓存，不变就不重建；
     provider 侧（如 DeepSeek 上下文缓存）也因此能命中稳定的前缀。
     """
-    api_key = _api_key(cfg)
-    if not api_key:
-        return "（回复生成失败：无 API key）"
-
     pname = persona_for_conversation(cfg, conversation, is_group)
     beh = behavior_for(cfg, pname)
     ppath = resolve_persona_path(_personas_cfg(cfg), pname) if pname else None
@@ -576,15 +575,25 @@ def llm_reply(cfg, conversation, inbound_text, context=None, is_group=True):
         wxbot_context.mtime_of((cfg.get("stickers") or {}).get("catalog", "")),
     )
     if wxbot_context._SYS_CACHE["key"] == sys_key and wxbot_context._SYS_CACHE["text"]:
-        system = wxbot_context._SYS_CACHE["text"]
-    else:
-        system = _build_system(cfg, conversation, inbound_text, is_group, pname, beh, ppath)
-        wxbot_context._SYS_CACHE["key"] = sys_key
-        wxbot_context._SYS_CACHE["text"] = system
+        return wxbot_context._SYS_CACHE["text"]
+    system = _build_system(cfg, conversation, inbound_text, is_group, pname, beh, ppath)
+    wxbot_context._SYS_CACHE["key"] = sys_key
+    wxbot_context._SYS_CACHE["text"] = system
+    return system
+
+
+def llm_reply(cfg, conversation, inbound_text, context=None, is_group=True):
+    """Generate a reply with an OpenAI-compatible chat completions API."""
+    api_key = _api_key(cfg)
+    if not api_key:
+        return "（回复生成失败：无 API key）"
+
+    system = system_prompt_for(cfg, conversation, inbound_text, is_group)
 
     if context:
         ctx = "\n".join(context)
-        style_block = style_learning_block(cfg, pname, context, is_group)
+        style_block = style_learning_block(
+            cfg, persona_for_conversation(cfg, conversation, is_group), context, is_group)
         user_content = (
             f"这是「{conversation}」里最近的聊天记录（我=张宇轩这边发的，对方=别人发的）：\n{ctx}\n\n"
             f"{style_block}\n"
@@ -1094,7 +1103,8 @@ def poll_once(cfg, state, hwnd):
             incoming = f"【发送者: 不确定，按普通群友礼貌友善对待】{target_text}"
         else:
             incoming = target_text
-        reply = llm_reply(cfg, name, incoming, context=ctx_lines, is_group=is_group)
+        reply = wxbot_agent.reply_dispatch(cfg, name, incoming, context=ctx_lines,
+                                           is_group=is_group, username=username)
         if not reply:
             _llm_note_failure()
             continue  # 不 mark_seen：退避结束后重新捡回来回
@@ -1103,7 +1113,9 @@ def poll_once(cfg, state, hwnd):
         if is_skip and is_target:
             # 对线目标的发言绝不允许 SKIP：强制重新生成，必须反击
             print(f"[poll] {name} target msg must not SKIP, regenerating")
-            reply = llm_reply(cfg, name, incoming + "\n（系统提示：这是对线目标的发言，你必须反击，绝不许回 [SKIP]）", context=ctx_lines, is_group=is_group)
+            reply = wxbot_agent.reply_dispatch(
+                cfg, name, incoming + "\n（系统提示：这是对线目标的发言，你必须反击，绝不许回 [SKIP]）",
+                context=ctx_lines, is_group=is_group, username=username)
             if not reply:
                 _llm_note_failure()
                 continue

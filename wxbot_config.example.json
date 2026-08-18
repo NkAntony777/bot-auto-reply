@@ -193,5 +193,25 @@
     "cache_ttl_s": 3600,
     "timeout_s": 15,
     "max_tools_per_reply": 6
+  },
+  "agent": {
+    "enabled": true,
+    "max_rounds": 5,
+    "tool_budget": 8,
+    "result_max_chars": 2000,
+    "allow_send_message": true,
+    "route_keywords": [
+      "查",
+      "谁",
+      "最近",
+      "排盘",
+      "占卜",
+      "算一卦",
+      "塔罗",
+      "黄历",
+      "八字",
+      "紫微",
+      "六爻"
+    ]
   }
 }

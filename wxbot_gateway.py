@@ -120,6 +120,28 @@ class Gateway:
 
     # ---------------- 相关性选择 + LLM tools 转换 ----------------
 
+    def _score(self, t, msg):
+        name = t.get("name", "")
+        s = len(name) * 2 if name in msg else 0
+        for kw in _KEYWORD_HINTS.get(name, "").split():
+            if kw in msg:
+                s += len(kw)
+        for kw in re.findall(r"[\u4e00-\u9fff]{2,4}", t.get("description") or ""):
+            if kw in msg and len(kw) >= 3:
+                s += len(kw)
+        return s
+
+    def relevance(self, message_text=""):
+        """消息是否命中任一网关工具关键词（agent 慢路径路由信号）。目录不可用返回 False。"""
+        if not self.cfg["enabled"]:
+            return False
+        try:
+            catalog = self.catalog()
+        except Exception:
+            return False
+        msg = message_text or ""
+        return any(self._score(t, msg) > 0 for t in catalog)
+
     def llm_tools(self, message_text="", max_n=None):
         """按消息相关性挑工具并转成 OpenAI function-calling tools 格式。
         相关性：关键词提示逐个在消息里找（中文无空格，不能按消息分词），
@@ -134,21 +156,10 @@ class Gateway:
         max_n = max_n or self.cfg["max_tools_per_reply"]
         msg = message_text or ""
 
-        def score(t):
-            name = t.get("name", "")
-            s = len(name) * 2 if name in msg else 0
-            for kw in _KEYWORD_HINTS.get(name, "").split():
-                if kw in msg:
-                    s += len(kw)
-            for kw in re.findall(r"[\u4e00-\u9fff]{2,4}", t.get("description") or ""):
-                if kw in msg and len(kw) >= 3:
-                    s += len(kw)
-            return s
-
-        ranked = sorted(catalog, key=score, reverse=True)
-        top_score = score(ranked[0]) if ranked else 0
+        ranked = sorted(catalog, key=lambda t: self._score(t, msg), reverse=True)
+        top_score = self._score(ranked[0], msg) if ranked else 0
         if top_score > 0:
-            picked = [t for t in ranked if score(t) > 0][:max_n]
+            picked = [t for t in ranked if self._score(t, msg) > 0][:max_n]
         else:
             picked = catalog[:3]
         return [{

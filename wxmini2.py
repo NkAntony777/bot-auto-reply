@@ -327,10 +327,49 @@ _LAST_OPENED = [None]  # [(nick_name, username)]
 _WECHAT_DB = [None]     # WeChatDB 单例（懒加载）
 
 
+def _patch_friendly_content():
+    """给 wechatauto 补上真正的 zstd 解压（猴子补丁，包本体不动）。
+
+    微信 4.x 会把长/多行文本、表情 XML 的 message_content 用 zstd 压缩存储；
+    wechatauto 的 _extract_text_from_blob 只是"跳过容器头找明文"的启发式，压实的
+    blob 解不出就退化成 '[文本]' 占位符——read_chat_db 读不到真实内容，
+    _send_text_core 的 DB 精确匹配发送确认也会误报失败。
+    只对文本类消息启用解压；表情/图片保持占位符语义（XML 对上下文无用）。"""
+    try:
+        import zstandard as _zstd
+        from wechatauto.db import WeChatDB as _WDB, _extract_text_from_blob as _heuristic
+    except ImportError:
+        return
+
+    def _friendly(content: bytes, mtype) -> str:
+        try:
+            text = content.decode("utf-8")
+            return text.strip() or f"[{mtype}]"
+        except UnicodeDecodeError:
+            pass
+        if mtype == "文本" and content[:4] == b"\x28\xb5\x2f\xfd":
+            try:
+                raw = _zstd.ZstdDecompressor().decompress(content, max_output_size=1 << 20)
+                return raw.decode("utf-8", "replace").strip() or f"[{mtype}]"
+            except Exception:
+                pass
+            text = _heuristic(content)
+            if text:
+                return text
+        if mtype == "图片":
+            md5 = re.search(rb'md5="([0-9a-fA-F]{32})"', content)
+            if md5:
+                return f"[图片 md5={md5.group(1).decode()}]"
+        return f"[{mtype}]"
+
+    _WDB._friendly_content = staticmethod(_friendly)
+
+
 def _get_db():
     """懒加载 WeChatDB 单例（首次初始化约 6 秒）"""
     if _WECHAT_DB[0] is None:
         from wechatauto import WeChatDB
+        _patch_friendly_content()
         _WECHAT_DB[0] = WeChatDB()
     return _WECHAT_DB[0]
 
@@ -510,25 +549,29 @@ def current_chat_name(hwnd: int = None) -> Optional[str]:
 
 def _find_sidebar_row(hwnd: int, fingerprint: str):
     """OCR 左侧会话列表（ImageGrab 屏幕截取，PrintWindow 偶发空白帧不可靠），
-    找含 fingerprint 的行，返回 (窗口内像素 x, y) 或 None。"""
+    找含 fingerprint 的行，返回 (窗口内像素 x, y) 或 None。
+    常规裁剪 (LIST_*) 找不到时，用从窗口顶开始的扩展裁剪再扫一遍——
+    有新消息的会话会顶到列表第一行，固定 LIST_Y1=0.10 的上边距在小窗口
+    （停靠虚拟屏后约 1000px 高）会把首行群名切掉。"""
     from PIL import Image
     img = _grab_window(hwnd)
     W, H = img.size
-    crop = _crop_pct(img, LIST_X1, LIST_Y1, LIST_X2, LIST_Y2)
-    crop2 = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
-    raw, _ = _get_ocr()(crop2)
-    if not raw:
-        return None
-    CH, CW = crop.height, crop.width
-    for bbox, text, conf in raw:
-        if conf < 0.5 or not text:
+    for y1 in (LIST_Y1, 0.02):
+        crop = _crop_pct(img, LIST_X1, y1, LIST_X2, LIST_Y2)
+        crop2 = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+        raw, _ = _get_ocr()(crop2)
+        if not raw:
             continue
-        cy = (bbox[0][1] + bbox[2][1]) / 2 / 2 / CH
-        cx = (bbox[0][0] + bbox[2][0]) / 2 / 2 / CW
-        if fingerprint and fingerprint in text:
-            px = int((LIST_X1 + (LIST_X2 - LIST_X1) * min(max(cx, 0.1), 0.9)) * W)
-            py = int((LIST_Y1 + (LIST_Y2 - LIST_Y1) * min(max(cy, 0.0), 1.0)) * H)
-            return px, py
+        CH, CW = crop.height, crop.width
+        for bbox, text, conf in raw:
+            if conf < 0.5 or not text:
+                continue
+            cy = (bbox[0][1] + bbox[2][1]) / 2 / 2 / CH
+            cx = (bbox[0][0] + bbox[2][0]) / 2 / 2 / CW
+            if fingerprint and fingerprint in text:
+                px = int((LIST_X1 + (LIST_X2 - LIST_X1) * min(max(cx, 0.1), 0.9)) * W)
+                py = int((y1 + (LIST_Y2 - y1) * min(max(cy, 0.0), 1.0)) * H)
+                return px, py
     return None
 
 
@@ -681,6 +724,11 @@ def _move_window_to(hwnd: int, sx: int, sy: int, sw: int, sh: int,
 def park_wechat(hwnd: int):
     """停靠微信窗口：有副屏/虚拟显示器 → 停到副屏（物理屏幕完全不可见，
     ImageGrab 仍能截取）；否则退回主屏右下角小窗。"""
+    # 最小化窗口 rect 在 (-32000,-32000)，MoveWindow 对它无效——必须先恢复。
+    # 开机自启/托盘驻留的微信默认最小化，没这步停靠会静默失败（2026-08-18 实测）。
+    if C.windll.user32.IsIconic(hwnd):
+        C.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        time.sleep(0.6)
     sec = secondary_screen_rect()
     if sec:
         sx, sy, sw, sh = sec
@@ -909,20 +957,21 @@ def _fuzzy_contains(needle: str, hay: str, threshold: float = 0.62) -> bool:
     return False
 
 
-def send_text(contact: str, text: str) -> bool:
+def send_text(contact: str, text: str, wait_idle: bool = True, open_fn=None) -> bool:
     """打开会话并发送文字（用户友好包装）。
     - 等用户键鼠空闲再动手（避免抢输入，最多等 2 分钟后强制发）
     - 窗口停靠右下角（不占主工作区）
     - 发完把前台焦点还给用户原来的窗口
     成功判定以「聊天区出现该消息气泡」为准（见 _send_text_core）。
-    """
-    if not wait_user_idle():
+    open_fn(hwnd, contact, timeout) -> bool：可注入的会话打开器（wxapi 固定坐标
+    快路径用），默认 open_chat_by_click（OCR 扫描）。"""
+    if wait_idle and not wait_user_idle():
         print("[wxmini2] user still active, sending anyway (timeout)")
     hwnd = find_wechat()
     park_wechat(hwnd)
     prev_fg = C.windll.user32.GetForegroundWindow()
     try:
-        return _send_text_core(hwnd, contact, text)
+        return _send_text_core(hwnd, contact, text, open_fn=open_fn)
     finally:
         if prev_fg and prev_fg != hwnd:
             try:
@@ -956,14 +1005,15 @@ def _input_dark_px(hwnd: int) -> int:
     return int((arr < 140).sum())
 
 
-def _send_text_core(hwnd: int, contact: str, text: str) -> bool:
+def _send_text_core(hwnd: int, contact: str, text: str, open_fn=None) -> bool:
     gap = time.time() - _last_send_ts[0]
     if gap < _MIN_SEND_GAP_S:
         time.sleep(_MIN_SEND_GAP_S - gap)
     force_foreground(hwnd)
+    opener = open_fn or open_chat_by_click
     # 切到指定会话
-    if not open_chat_by_click(hwnd, contact, timeout=6.0):
-        print(f"[wxmini2] open_chat_by_click failed: {contact}")
+    if not opener(hwnd, contact, timeout=6.0):
+        print(f"[wxmini2] open_chat failed: {contact}")
         return False
     time.sleep(0.3)
     # Qt 渲染兜底：聊天区空白时强制唤醒（点击→托盘复活→重启微信），
@@ -972,7 +1022,7 @@ def _send_text_core(hwnd: int, contact: str, text: str) -> bool:
         print("[wxmini2] render dead, escalating to WeChat restart")
         try:
             hwnd = restart_wechat()
-            if not open_chat_by_click(hwnd, contact, timeout=6.0):
+            if not opener(hwnd, contact, timeout=6.0):
                 return False
             if not ensure_chat_rendered(hwnd):
                 return False
@@ -1047,7 +1097,7 @@ def _send_text_core(hwnd: int, contact: str, text: str) -> bool:
             for m in msgs:
                 if (m.get("content") or "").strip() == text.strip():
                     return True
-            time.sleep(3)
+            time.sleep(1.2)
         print("[wxmini2] send not confirmed in DB within 30s")
         return False
     return True
@@ -1062,20 +1112,23 @@ def _input_box_text_stripped(hwnd: int) -> str:
 
 
 def _find_send_button(hwnd: int):
-    """OCR 找「发送」按钮的屏幕坐标（Enter 失败时的兜底点击）"""
+    """OCR 找「发送」按钮的屏幕坐标（Enter 失败时的兜底点击）。
+    bbox 是 crop 内坐标，换算窗口比例前必须加回 crop 原点偏移
+    （旧版漏了这步，算出的按钮位置 y 永远偏低 0.80*H）。"""
     _ensure_fg(hwnd)
     img = _grab_window(hwnd)
     W, H = img.size
     l, t, r, b, w, h = get_window_rect(hwnd)
-    crop = img.crop((int(W*0.28), int(H*0.80), W, H))
+    cx0, cy0 = int(W * 0.28), int(H * 0.80)
+    crop = img.crop((cx0, cy0, W, H))
     raw, _ = _get_ocr()(crop)
     if not raw:
         return None
     for bbox, text, conf in raw:
         if "发送" in text and conf > 0.6:
-            cx = (bbox[0][0] + bbox[2][0]) / 2 / W
-            cy = (bbox[0][1] + bbox[2][1]) / 2 / H
-            return int(l + cx * w), int(t + cy * h)
+            cx = (bbox[0][0] + bbox[2][0]) / 2 + cx0
+            cy = (bbox[0][1] + bbox[2][1]) / 2 + cy0
+            return int(l + cx / W * w), int(t + cy / H * h)
     return None
 
 # ============== 其它函数（占位 stub）=============
