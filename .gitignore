@@ -13,10 +13,13 @@ wxbot_status.json
 
 # 对话级记忆 workspace（含聊天提炼内容，不入库）
 workspaces/
+# mem0 记忆库（qdrant 向量库 + history.db，含聊天提炼内容，不入库）
+memory_store/
 
 # 本地图片库/贴纸目录/临时文件
 wxbot_images/
 tmp/
+_cache/
 
 # 系统/编辑器
 .DS_Store
@@ -40,4 +43,4 @@ fresh_*.png
 full_window_*.png
 _wxapi_e2e.log
 _wxapi_server.log
-_fixtures/results/
+tests/fixtures/results/

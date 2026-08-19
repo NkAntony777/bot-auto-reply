@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wxmini2 as wx
 import wxbot_files
 import wxbot_memory
+import wxbot_screener
 import wxbot_context
 import wxbot_agent
 
@@ -143,6 +144,12 @@ def load_config():
 def fingerprint(name, text):
     return hashlib.md5(f"{name}|{text}".encode("utf-8")).hexdigest()
 
+def _msg_key(b):
+    """消息身份键：已回复判定用它而非文本——同文本的新消息是不同消息，
+    必须回复（2026-08-19 修复：内容指纹导致重复台词被误判已回复）。
+    优先 DB 的 sort_seq/local_id（每条消息唯一），缺失时退化为时间戳。"""
+    return f"#{b.get('id') or b.get('ts') or '?'}"
+
 class State:
     def __init__(self, path):
         self.path = path
@@ -153,6 +160,8 @@ class State:
         return {
             "version": 1, "seen": {}, "replied_to": {}, "sent": [],
             "reply_ts": {}, "memory_extract_count": {},
+            "pending": {},    # 攒批等待：对话 → {"first": 首条待回消息时间, "fp": 最新指纹}
+            "proactive": {},  # 主动说话：{"tick_ts": t, "day": "YYYY-MM-DD", "count": n, 对话名: {"ts": t}}
         }
     def _load(self):
         try:
@@ -184,12 +193,13 @@ class State:
         return self.data["seen"].get(name) == fp
     def mark_seen(self, name, text):
         self.data["seen"][name] = fingerprint(name, text)
-    def replied_to(self, name, text):
+    def replied_to(self, name, msg_key):
+        """msg_key 为 _msg_key() 消息身份键（非文本）——按消息判重，不按内容。"""
         fps = self.data.get("replied_to", {}).get(name, [])
-        return fingerprint(name, text) in fps
-    def mark_replied(self, name, text):
+        return fingerprint(name, msg_key) in fps
+    def mark_replied(self, name, msg_key):
         fps = self.data.setdefault("replied_to", {}).setdefault(name, [])
-        fps.append(fingerprint(name, text))
+        fps.append(fingerprint(name, msg_key))
         self.data["replied_to"][name] = fps[-40:]
     def last_reply_ts(self, name):
         return self.data.get("reply_ts", {}).get(name, 0)
@@ -693,8 +703,8 @@ def _build_system(cfg, conversation, inbound_text, is_group, pname, beh, ppath):
                 inbound_text = inbound_text.replace("【发送者: 不确定，按普通群友礼貌友善对待】", "【发送者：按当前人格应对】")
         except Exception as e:
             print(f"persona load error ({pname}):", e)
-    # ---- 记忆注入（workspace 隔离，按对话独立） ----
-    mem = wxbot_memory.memory_inject(cfg, conversation)
+    # ---- 记忆注入（workspace 隔离，按对话独立；query=对方刚发的消息，供 mem0 语义检索） ----
+    mem = wxbot_memory.memory_inject(cfg, conversation, query=inbound_text)
     if mem:
         system += "\n" + mem
     return system
@@ -731,7 +741,15 @@ def _api_key(cfg):
 
 
 def _memory_extract(cfg, name, ctx_lines):
-    """记忆提取：用 LLM 从最近聊天提炼事实，写入该对话 workspace 的当日笔记。"""
+    """记忆提取：优先 mem0（LLM 提取事实 + 自动去重更新 + 向量入库），
+    未启用/不可用/失败时退回旧方案（LLM 提炼 → 当日笔记）。"""
+    if wxbot_memory.mem0_enabled(cfg):
+        try:
+            if wxbot_memory.mem0_add(cfg, name, ctx_lines):
+                return True
+        except Exception as e:
+            print("mem0 add error:", e)
+        print("[memory] mem0 unavailable, fallback to markdown extract")
     try:
         pname = persona_for_conversation(cfg, name, True)
         ppath = resolve_persona_path(_personas_cfg(cfg), pname) if pname else None
@@ -877,6 +895,166 @@ def _log_uia_error(e):
             print(f"list_sessions error: (已连续 {_UIA_ERR['count']} 次) {msg[:60]}")
 
 
+def _ctx_from_msgs(msgs, ctx_n, is_group):
+    """把最近 msgs 组成「谁: 内容」上下文行（群聊带发送者昵称）。"""
+    lines = []
+    for m in msgs[-ctx_n:]:
+        if m["side"] == "own":
+            who = "我"
+        else:
+            who = m.get("sender") if (is_group and m.get("sender") not in (None, "", "我", "对方")) else "对方"
+        if m["kind"] == "text":
+            lines.append(f"{who}: {m['text'][:100]}")
+        elif m["kind"] == "image":
+            lines.append(f"{who}: [图片]")
+        elif m["kind"] == "file":
+            _fn = wxbot_files.filename_from_bubble(m.get("text", ""))
+            lines.append(f"{who}: [文件{_fn}]")
+    return lines
+
+
+def _name_called(cfg, text):
+    """消息文本里是否叫到机器人的名字（叫到 = 一律回复，绕过快筛等一切"值不值得回"判断）。
+    名字来源：reply.call_names（人格昵称，如 阿廖沙/沙沙）+ own_nicknames + mention_names，任一子串命中即算。"""
+    t = text or ""
+    if not t:
+        return False
+    names = set(cfg["reply"].get("call_names", []) or [])
+    names.update(cfg.get("own_nicknames", []) or [])
+    names.update((cfg["reply"].get("group", {}) or {}).get("mention_names", []) or [])
+    tl = t.lower()
+    return any((n or "").strip() and (n or "").strip().lower() in tl for n in names)
+
+
+# ---------------------------------------------------------------- 主动说话
+def _in_active_hours(ah):
+    """{"start": "09:00", "end": "22:30"}，支持跨夜（如 21:00→08:00）。空配置=不限。"""
+    if not ah or not ah.get("start") or not ah.get("end"):
+        return True
+    def _m(s):
+        h, _, mi = str(s).partition(":")
+        return int(h) * 60 + int(mi or 0)
+    t = time.localtime()
+    now_m = t.tm_hour * 60 + t.tm_min
+    a, b = _m(ah["start"]), _m(ah["end"])
+    return a <= now_m < b if a <= b else (now_m >= a or now_m < b)
+
+
+def _strip_capability_markers(text):
+    """主动消息只发纯文本：去掉 [IMG]/[EMOJI]/[STICKER]/[AUDIO]/[Q]/@ 等能力标记行。"""
+    lines = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if re.match(r"^(\[(IMG|EMOJI|STICKER|AUDIO|Q)[:\]]|\[SKIP\]|@)", s):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _proactive_tick(cfg, state, wx):
+    """主动说话（每分钟最多评估一轮）：白名单对话静默够久 → 让主模型决定要不要自然开个口。
+    保守设计：白名单制 + 单聊最小间隔 + 全局日上限 + 时段限制 + 免打扰时段 + 上次主动没人理就不再推。"""
+    pcfg = cfg.get("proactive") or {}
+    if not pcfg.get("enabled", False):
+        return
+    if time.time() < _LLM_BACKOFF["until"]:
+        return  # LLM 全局退避中，主动说话同样歇着
+    pdata = state.data.setdefault("proactive", {})
+    now = time.time()
+    if now - float(pdata.get("tick_ts", 0) or 0) < 60:
+        return
+    pdata["tick_ts"] = now
+    if not _in_active_hours(pcfg.get("active_hours") or {}):
+        return
+    today = time.strftime("%Y-%m-%d")
+    if pdata.get("day") != today:
+        pdata["day"], pdata["count"] = today, 0
+    max_day = int(pcfg.get("max_per_day", 6))
+    if int(pdata.get("count", 0)) >= max_day:
+        return
+    convos = pcfg.get("conversations") or []
+    if not convos:
+        return
+    try:
+        sessions = {s["name"]: (s.get("username") or "") for s in wx.db_sessions(limit=60) if s.get("name")}
+    except Exception as e:
+        print("[proactive] db_sessions error:", e)
+        return
+    ctx_cfg = cfg["reply"].get("context_messages", 8)
+    min_silence = float(pcfg.get("min_silence_min", 90)) * 60
+    min_interval = float(pcfg.get("min_interval_min", 240)) * 60
+    for name in convos:
+        if int(pdata.get("count", 0)) >= max_day:
+            break
+        username = sessions.get(name)
+        if not username or name in cfg["reply"].get("deny_contacts", []):
+            continue
+        # 免打扰时段同样约束主动说话
+        qh = cfg["reply"]["private"].get("quiet_hours", {}) or {}
+        if in_quiet_hours(qh) and name not in (qh.get("allow_contacts", []) or []):
+            continue
+        try:
+            msgs = wx.read_chat_db(username, limit=10)
+        except Exception:
+            continue
+        if not msgs:
+            continue
+        is_group = username.endswith("@chatroom")
+        rec = pdata.get(name) or {}
+        last_proactive = float(rec.get("ts", 0) or 0)
+        if now - last_proactive < min_interval:
+            continue
+        newest_ts = max(float(m.get("ts") or 0) for m in msgs)
+        other_ts = max((float(m.get("ts") or 0) for m in msgs if m.get("side") == "other"), default=0)
+        last_active = max(newest_ts, state.last_reply_ts(name))
+        if now - last_active < min_silence:
+            continue  # 对话还热着，不插嘴
+        if last_proactive > 0 and last_proactive > other_ts:
+            continue  # 上次主动说话对方一直没回，不再推
+        silence_min = int((now - last_active) / 60)
+        ctx_n = int(ctx_cfg.get(name, ctx_cfg.get("default", 8))) if isinstance(ctx_cfg, dict) else int(ctx_cfg)
+        ctx_lines = _ctx_from_msgs(msgs, max(ctx_n, 6), is_group)
+        pname = persona_for_conversation(cfg, name, is_group)
+        ppath = resolve_persona_path(_personas_cfg(cfg), pname) if pname else None
+        system = _build_system(cfg, name, "", is_group, pname, behavior_for(cfg, pname), ppath)
+        system += (
+            "\n\n【主动说话模式】这个对话已经静默了一段时间。如果你想到什么自然的、"
+            "值得一说的话（可以结合记忆或最近的话题，比如关心、追问后续、分享相关的事），"
+            "就把它说出来，像真人朋友那样开口，一到三句即可；如果实在没什么好说的，"
+            "只回复 [SKIP]。禁止提“我是主动来发消息的/系统让我说话”这类话，"
+            "禁止使用 [IMG]/[EMOJI]/[STICKER]/[AUDIO]/[Q]/@ 等特殊标记，只发纯文本。"
+        )
+        user = ("这个对话最近的内容：\n" + "\n".join(ctx_lines)
+                + f"\n\n（已经静默约 {silence_min} 分钟。要不要主动说点什么？）")
+        pdata[name] = {"ts": now}   # 记账防重入；LLM 挂了会回滚，下轮再试
+        try:
+            reply = _llm_call(cfg, system, user)
+        except Exception as e:
+            print("[proactive] llm error:", e)
+            reply = None
+        if reply is None:   # LLM 没给出决策（异常/空回）：回滚记账，稍后重试
+            pdata.pop(name, None)
+            state.save()
+            continue
+        if not reply or re.fullmatch(r"\s*\[SKIP\]\s*", reply):
+            print(f"[proactive] {name} 决定不主动说话")
+            state.save()
+            continue
+        body = _strip_capability_markers(reply)
+        if not body:
+            state.save()
+            continue
+        print(f"[proactive] {name} 主动说话: {body[:50]!r}")
+        try:
+            if wx.send_text(name, body):
+                state.record_sent(name, body)
+                state.mark_reply_ts(name)
+                pdata["count"] = int(pdata.get("count", 0)) + 1
+        except Exception as e:
+            print("[proactive] send error:", e)
+        state.save()
+
+
 def poll_once(cfg, state, hwnd):
     """One poll cycle (DB-driven). Returns (replied, n_sessions)；n_sessions=-1 表示会话列表读取异常。
     会话列表/消息内容/判边全部来自解密数据库（权威、无截断）；
@@ -920,7 +1098,7 @@ def poll_once(cfg, state, hwnd):
         ctx_n = max(1, min(1000, ctx_n))
 
         # 直接读数据库（不点窗口；判边权威）。summary 列常为空串，
-        # 变化检测改用「最新消息 ts+内容」指纹。
+        # 变化检测用「最新消息 id+ts+内容」指纹（id 为 DB sort_seq，同秒同文也能区分）。
         try:
             msgs = wx.read_chat_db(username, limit=max(ctx_n, 5))
         except Exception as e:
@@ -929,7 +1107,7 @@ def poll_once(cfg, state, hwnd):
         if not msgs:
             continue  # 本地没有该会话消息表（如没聊天记录的联系人）
         newest = msgs[-1]
-        last_fp = f"{newest.get('ts')}|{newest.get('side')}|{newest.get('text', '')[:60]}"
+        last_fp = f"{newest.get('id', '')}|{newest.get('ts')}|{newest.get('side')}|{newest.get('text', '')[:60]}"
         # skip if we already handled this exact last message
         if state.is_seen(name, last_fp):
             continue
@@ -962,14 +1140,20 @@ def poll_once(cfg, state, hwnd):
                 print(f"[poll] {name} quiet hours, skip private reply")
                 continue
 
-        # 群聊：无限制群跳过 @ 检查；其余群看会话预览「[有人@我]」标记
+        # 群聊：无限制群跳过 @ 检查；其余群看会话预览「[有人@我]」标记，
+        # 另外叫到名字（文字@/直呼其名，如「阿廖沙你觉得」）视同被点名，同样开火
         if is_group and policy.get("require_mention", False) and not unlimited:
+            _other_texts = [m for m in msgs if m["side"] == "other" and m["kind"] == "text"]
+            name_called = bool(_other_texts) and _name_called(cfg, _other_texts[-1]["text"])
             has_badge = "[有人@我]" in (last or "")
-            print(f"[poll] {name} group badge={has_badge}")
-            if not has_badge:
+            print(f"[poll] {name} group badge={has_badge} name_called={name_called}")
+            if not has_badge and not name_called:
                 state.mark_seen(name, last_fp)
                 state.save()
                 continue
+        else:
+            # 私聊/无限制群：名字判断留到后面统一做（快筛豁免 + 更快攒批）
+            name_called = False
 
         # 无限制群：同一群回复间隔限制
         if is_group and unlimited:
@@ -1029,11 +1213,14 @@ def poll_once(cfg, state, hwnd):
         sender = last_bubble.get("sender") if is_group else None
         if sender in ("我", "对方", None, ""):
             sender = None
+        # 叫到名字：私聊/无限制群在这里判（require_mention 群在 @ 门已判）
+        if not name_called and last_bubble["kind"] == "text":
+            name_called = _name_called(cfg, target_text)
         # 硬性标注对线目标：昵称同时包含 matcher 里所有关键词才算目标，否则一律群友
         matcher = (cfg["reply"].get("target_matcher", {}) or {}).get(name, {})
         must_all = [k.lower() for k in matcher.get("contains_all", [])]
         is_target = bool(sender) and bool(must_all) and all(k in sender.lower() for k in must_all)
-        if state.replied_to(name, target_text):
+        if state.replied_to(name, _msg_key(last_bubble)):
             print(f"[poll] {name} skip: already replied to this msg")
             state.mark_seen(name, last_fp)
             state.save()
@@ -1043,20 +1230,28 @@ def poll_once(cfg, state, hwnd):
             state.save()
             continue
 
+        # ---- 攒批等待（settle）：对方还在连发时先别回——等静默 settle_s（被叫到名字时等更短的
+        # settle_s_called，被点名反应快一点）或累计 settle_max_s，一次读完整段话再回。
+        # settle_s=0 关闭（老行为：来一条回一条）。----
+        _settle_s = float(cfg["reply"].get("settle_s", 0) or 0)
+        _settle_called = float(cfg["reply"].get("settle_s_called", 0) or 0)
+        _wait_s = _settle_called if (name_called and _settle_called > 0) else _settle_s
+        if _wait_s > 0:
+            _pend = state.data["pending"].get(name) or {}
+            _first = float(_pend.get("first") or 0)
+            if not _first or now - _first > 86400:
+                _first = now
+            state.data["pending"][name] = {"first": _first, "fp": last_fp}
+            _newest_age = now - float(newest.get("ts") or 0)
+            _settle_max = float(cfg["reply"].get("settle_max_s", 60) or 60)
+            if _newest_age < _wait_s and (now - _first) < _settle_max:
+                state.save()
+                continue  # 对方可能还在打字：本轮不回，下轮连着一起读
+            state.data["pending"].pop(name, None)
+            state.save()
+
         # build context lines (recent messages with side markers) for the LLM
-        ctx_lines = []
-        for m in msgs[-ctx_n:]:
-            if m["side"] == "own":
-                who = "我"
-            else:
-                who = m.get("sender") if (is_group and m.get("sender") not in (None, "", "我", "对方")) else "对方"
-            if m["kind"] == "text":
-                ctx_lines.append(f"{who}: {m['text'][:100]}")
-            elif m["kind"] == "image":
-                ctx_lines.append(f"{who}: [图片]")
-            elif m["kind"] == "file":
-                _fn = wxbot_files.filename_from_bubble(m.get("text", ""))
-                ctx_lines.append(f"{who}: [文件{_fn}]")
+        ctx_lines = _ctx_from_msgs(msgs, ctx_n, is_group)
 
         # 自动上下文压缩（预算按百分比或词元数；两阶段：截断旧消息→丢最旧）
         _budget = wxbot_context.budget_tokens(cfg)
@@ -1078,6 +1273,20 @@ def poll_once(cfg, state, hwnd):
             incoming = f"【发送者: 不确定，按普通群友礼貌友善对待】{target_text}"
         else:
             incoming = target_text
+
+        # ---- 快筛 gate：极速小模型先判断值不值得回（fail-open：快筛挂了就放行主模型）。
+        # 叫到名字 / 对线目标不经快筛——必须回。----
+        if name_called:
+            print(f"[screen] {name} 叫到名字，跳过快筛直接回")
+        elif wxbot_screener.active(cfg) and not is_target:
+            _worth, _why = wxbot_screener.should_reply(cfg, name, incoming, ctx_lines, is_group)
+            if not _worth:
+                print(f"[screen] {name} 不值得回（{_why}）")
+                state.mark_seen(name, last_fp)
+                state.data["pending"].pop(name, None)
+                state.save()
+                continue
+
         reply = wxbot_agent.reply_dispatch(cfg, name, incoming, ctx_lines=ctx_lines,
                                            is_group=is_group, username=username)
         if not reply:
@@ -1085,11 +1294,13 @@ def poll_once(cfg, state, hwnd):
             continue  # 不 mark_seen：退避结束后重新捡回来回
         _llm_note_success()
         is_skip = re.fullmatch(r"\s*\[SKIP\]\s*", reply) is not None
-        if is_skip and is_target:
-            # 对线目标的发言绝不允许 SKIP：强制重新生成，必须反击
-            print(f"[poll] {name} target msg must not SKIP, regenerating")
+        if is_skip and (is_target or name_called):
+            # 对线目标的发言 / 叫到名字的发言绝不允许 SKIP：强制重新生成，必须回应
+            _hint = ("\n（系统提示：这是对线目标的发言，你必须反击，绝不许回 [SKIP]）" if is_target
+                     else "\n（系统提示：对方在叫你的名字，你必须回应，绝不许回 [SKIP]）")
+            print(f"[poll] {name} {'target' if is_target else 'name-called'} msg must not SKIP, regenerating")
             reply = wxbot_agent.reply_dispatch(
-                cfg, name, incoming + "\n（系统提示：这是对线目标的发言，你必须反击，绝不许回 [SKIP]）",
+                cfg, name, incoming + _hint,
                 ctx_lines=ctx_lines, is_group=is_group, username=username)
             if not reply:
                 _llm_note_failure()
@@ -1139,6 +1350,17 @@ class _Tee:
 # ---------------------------------------------------------------- 单实例 + 状态心跳
 PID_FILE = os.path.join(BASE, "wxbot.pid")
 STATUS_FILE = os.path.join(BASE, "wxbot_status.json")
+# 停止标记：stop_wxbot.py 写入 → 主循环检测到即优雅退出（走 finally 清理）；
+# 启动时清残留，防止上次遗留的标记让新实例秒退
+STOP_FILE = os.path.join(BASE, "wxbot.stop")
+
+
+def _clear_stale_stop():
+    try:
+        if os.path.exists(STOP_FILE):
+            os.remove(STOP_FILE)
+    except OSError:
+        pass
 
 
 def _wxbot_script_pids(script_name):
@@ -1252,6 +1474,7 @@ def main():
         return
     sys.stdout = _Tee(sys.stdout, os.path.join(BASE, "wxbot_run.log"))
     ensure_single_instance()  # 先清场：任何旧实例（含别的 python 环境起的）都杀掉
+    _clear_stale_stop()
     _maybe_start_dashboard(cfg)
     state = State(cfg["state_file"])
     hwnd = wx.find_wechat()
@@ -1283,6 +1506,7 @@ def main():
                 replied, n_sessions = poll_once(cfg, state, hwnd)
                 if replied:
                     print(f"replied {len(replied)} conversation(s)")
+                _proactive_tick(cfg, state, wx)  # 主动说话（内部 60s 节流，disabled 时直接返回）
                 uia_fail_streak = 0
             except Exception as e:
                 print("poll error:", e)
@@ -1299,9 +1523,13 @@ def main():
             except Exception:
                 pass
             time.sleep(cfg["poll_interval_seconds"])
+            if os.path.exists(STOP_FILE):
+                print("[wxbot] stop file detected, shutting down...")
+                break
     except KeyboardInterrupt:
         print("\n[wxbot] Ctrl+C, shutting down...")
     finally:
+        _clear_stale_stop()
         state.save()
         clear_pid_file()
         _give_back_wechat(hwnd)
@@ -1494,7 +1722,7 @@ def _send_reply(cfg, state, name, reply, is_group, last_bubble, is_target, ctx_l
     done = (send_failures == 0 or sent_ok > 0) and not critical_fail
     if done:
         # 有句子成功发出即算这轮回复完成（含部分成功：避免下轮重复回复）
-        state.mark_replied(name, target_text)
+        state.mark_replied(name, _msg_key(last_bubble))
         state.mark_reply_ts(name)
         state.mark_seen(name, last_fp)
         # 记忆系统：每 N 轮做一次事实提取（workspace 隔离）

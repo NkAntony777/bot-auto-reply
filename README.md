@@ -27,8 +27,12 @@
   - `[EMOJI:表情名]` 发微信自带表情
   - `[STICKER:编号或关键词]` 发「爱心」收藏里的自定义表情包贴纸
   - 对方发图 → 自动识图（vision 模型描述）；对方发文件 → 自动读取内容（docx/pdf/xlsx/md/txt…）
+- **攒批等待（仿真人节奏）**：对方连发消息时先不回——等静默 `settle_s` 秒（被叫到名字时等更短的 `settle_s_called`，反应更快）或累计 `settle_max_s` 封顶后通读整段再回一次，不再来一条回一条
+- **叫名字必回**：消息里出现 `reply.call_names`（如 阿廖沙/沙沙）或账号昵称 = 一律回复——绕过快筛、群聊不开 @ 徽章也算被点名、主模型想 [SKIP] 会被强制重新生成
+- **快筛 gate**：极速小模型（默认 `step-3.5-flash`）先判断消息值不值得回，不值得就不惊动主模型（fail-open：快筛挂了照常走主模型；对线目标/叫名字不经过快筛）
+- **主动说话**：白名单对话静默够久时，主模型决定要不要自然地开个口（关心/追问后续/分享）；带单聊间隔、每日上限、时段、免打扰、"上次没人理就不再推"多重保守限制，默认关闭
 - **行为旋钮**：`@` / 表情 / 贴纸 / 图片 / 引用 各有一个 0~1 频率，发送时硬性掷骰子节流，避免机械感
-- **对话记忆**：每 N 轮自动提炼事实，按对话隔离存到 `workspaces/<对话>/`，注入后续 system prompt
+- **对话记忆（双层）**：mem0 语义记忆（每 N 轮 LLM 提取事实+自动去重更新，本地 qdrant 向量库，回复前按当前消息语义检索 top-k 注入；embedding 走 MiniMax embo-01）+ markdown 记忆兜底/镜像（`workspaces/<对话>/`，人类可读可手改）
 - **上下文按需读取 + 自动压缩**：只追溯要回复的那个窗口所需的历史条数；超预算按词元压缩（截断旧消息 → 丢最旧）
 - **多通道 LLM fallback + 全局退避**：主模型挂了逐个试备用通道；全挂进入退避、**不丢消息**，网络恢复自动重试
 - **UIA 自愈**：微信 UIA 树挂死时自动重启微信进程恢复
@@ -46,7 +50,7 @@ wxbot_dashboard.py 本地只读看台（127.0.0.1:8788）：状态卡片 + 日�
 wxmini2.py      视觉自动化库：ImageGrab+RapidOCR / 侧边栏定位点击 / 发送验证链 / 渲染三级自愈 / 微信重启
 wxmini.py       旧版 UIA 库（保留兼容）
 wxbot_files.py  文件消息读取：定位微信文件存储 + 按类型解析（docx/pdf/xlsx/xls/md/txt）
-wxbot_memory.py 记忆系统：workspace 骨架 + system 注入 + LLM 事实提取
+wxbot_memory.py 记忆系统（双层）：mem0 语义记忆（默认，本地 qdrant+SQLite，MiniMax embo-01 embedding 适配器）+ markdown 记忆兜底/镜像（workspace 骨架 + system 注入 + LLM 事实提取）
 wxbot_context.py 输入缓存 + 词元估算 + 上下文压缩
 wxbot_stickers.py 贴纸目录重建（截图 + vision 建档 catalog.json）
 personas/       人格文件（每个 .md = 一个人格，文件名即人格名；含示例 wen.md）
@@ -91,6 +95,13 @@ python -X utf8 wxbot.py          # 常驻（启动自动清理旧实例，重复
 python -X utf8 wxbot.py --once   # 只跑一轮，调试用
 ```
 
+停止（安全退出：保存状态、微信从虚拟屏还回主屏、停看板）：
+
+```bash
+stop_wxbot.bat                   # 双击即可；优雅退出优先，超时询问是否强杀
+python -X utf8 stop_wxbot.py --status   # 只查看进程/微信位置，不动手
+```
+
 本地看台（只读监测，随 wxbot 自动拉起；也可独立跑 `python wxbot_dashboard.py`）：
 
 ```
@@ -122,8 +133,12 @@ npm start        # http://127.0.0.1:7931
 | `reply.context_messages` | 每个会话追溯的历史条数（`{"default": 8, "某群": 30}`） |
 | `reply.personas` | 人格：`per_group` / `per_contact` / `default` 指派，`definitions` 映射人格名→文件，`behaviors` 行为旋钮 |
 | `reply.target_matcher` | 按群指定「对线目标」（`contains_all` 关键词全命中才算），目标发言强制反击不许 SKIP |
+| `reply.settle_s` / `reply.settle_max_s` / `reply.settle_s_called` | 攒批等待：对方静默多少秒才回 / 连发时最多等多少秒 / 被叫到名字时等多少秒（`settle_s: 0` 关闭） |
+| `reply.call_names` | 叫到这些名字一律回复（绕过快筛、群聊视同被 @），配合 `own_nicknames` / `mention_names` 一起识别 |
+| `screener` | 快筛 gate：`model`（默认 step-3.5-flash，字段缺省继承主 llm 通道）、`timeout_s`、`max_ctx_lines`、`fallbacks` |
+| `proactive` | 主动说话：`enabled`（默认关）、`conversations` 白名单、`min_silence_min`、`min_interval_min`、`max_per_day`、`active_hours` |
 | `context.compression` | 上下文压缩：按百分比或词元预算，两阶段（截断→丢最旧） |
-| `memory` | 记忆系统：`every_n_replies` 每 N 轮提取一次事实 |
+| `memory` | 记忆系统：`backend`（`mem0` 语义记忆 / `markdown` 旧方案）、`every_n_replies` 提取节奏、`search_top_k`/`search_max_chars`/`search_threshold` 语义检索参数、`mem0.llm` 提取 LLM（默认主通道）、`mem0.embedder`（默认 MiniMax embo-01） |
 | `dashboard` | 本地看台：`enabled` / `port`（默认 8788），wxbot 启动时自动拉起 |
 | `images` / `stickers` / `files` | 图片库 / 贴纸目录 / 文件解析上限 |
 

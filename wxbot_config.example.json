@@ -108,7 +108,14 @@
           "YOUR_KEYWORD"
         ]
       }
-    }
+    },
+    "settle_s": 10,
+    "settle_max_s": 60,
+    "call_names": [
+      "阿廖沙",
+      "沙沙"
+    ],
+    "settle_s_called": 5
   },
   "llm": {
     "base_url": "https://YOUR_LLM_ENDPOINT/v1",
@@ -171,9 +178,20 @@
   },
   "memory": {
     "enabled": true,
+    "backend": "mem0",
     "every_n_replies": 5,
     "long_term_chars": 1200,
-    "daily_chars": 800
+    "daily_chars": 800,
+    "search_top_k": 4,
+    "search_max_chars": 500,
+    "mem0": {
+      "embedder": {
+        "base_url": "https://api.minimaxi.com/v1",
+        "model": "embo-01",
+        "api_key_env": "WXBOT_LLM_KEY",
+        "dims": 1536
+      }
+    }
   },
   "state_file": "YOUR_ABS_PATH/wxbot_state.json",
   "dashboard": {
@@ -285,6 +303,28 @@
       "voice": "vibrant-youth",
       "instruction": "正太童声，10岁小男孩，声音清亮细",
       "timeout_s": 120
+    }
+  },
+  "screener": {
+    "enabled": true,
+    "base_url": "",
+    "model": "step-3.5-flash",
+    "api_key_env": "",
+    "temperature": 0.1,
+    "timeout_s": 20,
+    "max_ctx_lines": 10,
+    "fallbacks": [],
+    "max_tokens": 700
+  },
+  "proactive": {
+    "enabled": false,
+    "conversations": [],
+    "min_silence_min": 90,
+    "min_interval_min": 240,
+    "max_per_day": 6,
+    "active_hours": {
+      "start": "09:00",
+      "end": "22:30"
     }
   }
 }
