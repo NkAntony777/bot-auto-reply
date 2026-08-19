@@ -588,6 +588,7 @@ def read_chat_db(username: str, limit: int = 20) -> List[Dict]:
         else:
             sender = "对方"
         out.append({
+            "id": m.get("sort_seq") or m.get("local_id") or m.get("create_time", 0),
             "kind": kind,
             "text": content,
             "side": side,

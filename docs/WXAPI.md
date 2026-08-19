@@ -24,7 +24,7 @@ OCR 从主路径挤到兜底位：会话定位用「DB 行号 → 侧边栏固�
 .venv/Scripts/python.exe -X utf8 wxapi.py --cli open 阿布菠萝终极粉丝后援团
 
 # 端到端测试（对 filehelper 发文字/图/文件并做 DB 断言）
-.venv/Scripts/python.exe -X utf8 wxapi_test.py
+.venv/Scripts/python.exe -X utf8 tests/wxapi_test.py
 ```
 
 ## HTTP API（127.0.0.1 + token）
@@ -88,7 +88,7 @@ send_image/file → 剪贴板 → Ctrl+V → Enter（失败点发送按钮）→
 - HTTP：health / token 鉴权 401 / sessions / screenshot：✅
 - open / send_text / send_image / send_file 端到端：**代码就绪，验收中断**——
   微信中途退到扫码登录页（多次强杀触发），扫码需人工。恢复登录后跑
-  `wxapi_test.py` 即可完成验收。
+  `tests/wxapi_test.py` 即可完成验收。
 
 ## 与 Phase 1 agent 的关系
 

@@ -80,7 +80,7 @@
 ### 阶段 A：PydanticAI v2 换脑（**2-3 晚**，仅慢路径）—— ✅ 已完工 2026-08-18
 
 > 实际 1 晚完工（评审估 2-3 晚）：收口层重构后工具实现零改动复用是关键提速项。
-> 交付：`wxbot_agent_py.py`（当前默认引擎）+ `run_fixtures.py`（route 12/12，
+> 交付：`wxbot_agent_py.py`（当前默认引擎）+ `tests/run_fixtures.py`（route 12/12，
 > full 双引擎 8/8 零 crash，塔罗 seed 跨引擎同牌验证确定性）+ 配置 `agent.engine`
 > 一行回滚。快路径未动。
 
@@ -106,7 +106,7 @@
 **阶段 A.5（并行做）：fixture 语料库。** 双引擎灰度期间把 wxbot_run.log 的
 输入（conversation/inbound/ctx_lines/is_group/username）+ 双路输出固化成
 fixture 集（目标 ≥20 条，覆盖：八字/塔罗/查群史/画图/网关挂/发送预算/空响应/
-快路径样例），落 `_fixtures/` + `run_fixtures.py` 重放脚本。以后每次框架升级
+快路径样例），落 `tests/fixtures/` + `tests/run_fixtures.py` 重放脚本。以后每次框架升级
 重放一遍——顺手解决"无评测"痛点。
 
 ### 阶段 B：工具层 MCP 化（1-2 晚，**先定 ctx 状态方案再动手**）—— ✅ 已完工 2026-08-18

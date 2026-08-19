@@ -4,7 +4,7 @@
 目标会话固定为 filehelper（文件传输助手 = 发给自己，零打扰）。
 覆盖：health / 鉴权拒绝 / sessions / open（快路径两次，第二次应命中模板缓存）/
 send_text / send_image / send_file（DB 类型+方向断言）/ screenshot / 虚拟屏守护。
-用法：.venv/Scripts/python.exe -X utf8 wxapi_test.py
+用法：.venv/Scripts/python.exe -X utf8 tests/wxapi_test.py
 """
 import json
 import os
@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根（脚本在 tests/ 下）
 PORT = None
 TOKEN = None
 RESULTS = []

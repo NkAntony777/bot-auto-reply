@@ -214,6 +214,18 @@ generate_image 走 StepFun 同 key 生图（`wxbot_genimg`），回复带 `[IMG:
   不需要管理员权限**（只有首次装驱动要 UAC）；重挂后用 `enableidd 0` 再
   `enableidd 1` 可清掉多挂的屏。已提供 `enable_virtual_display.bat`；
   bot 检测不到副屏时自动退回主屏右下角停靠模式，功能不中断。
+- **2026-08-19 补充实测**：当天发现驱动曾整体消失（驱动库无 usbmmidd INF、
+  SCM 服务与 PnP 设备全无，仅剩 `WUDF\Services\usbmmIdd` 残留注册表键，原因
+  不明），UAC 重装一次 `deviceinstaller64 install usbmmidd.inf usbmmidd` 即恢复
+  （setupapi.dev.log 验证 Exit status: SUCCESS）。非提权 cmd 实测确认挂载免管理
+  员；**注意：在沙箱化/受限 shell 里 deviceinstaller64 会静默失效（exit 0 但
+  不挂屏），排查时务必用真实 cmd 双击/裸 shell**。`start_wxbot.bat` 已接入
+  交互式挂载流程（检测单屏 → 询问 → 挂载 → 复核）。
+- **安全停止**（2026-08-19 新增）：`stop_wxbot.bat` / `stop_wxbot.py`——写
+  `wxbot.stop` 标记文件，主循环每轮检测到即 break 走 finally 清理（保存状态、
+  清 pid、微信还回主屏）；启动时清残留标记防秒退。脚本等待最长 20s，超时
+  （回复发送中途）询问是否强杀；强杀后兜底检查微信是否仍停靠虚拟屏并补还
+  主屏；看板为无状态观察者直接结束。`--status` 参数只查看不动手。
 
 
 - 发送仍需真实鼠标键盘事件 + 微信前台可见（视觉方案本质），已用"等空闲+停靠+还焦点"把干扰降到最低
@@ -225,3 +237,10 @@ generate_image 走 StepFun 同 key 生图（`wxbot_genimg`），回复带 `[IMG:
   `wxbot_images/stickers/catalog.json` 不存在时会打无害告警
 - 对方发图目前只传占位文本给 LLM（DB 拿不到气泡截图，识图链路待接）
 - state 的 seen 指纹以"最新消息"为键：批量离线消息涌来时只处理最新一条（设计取舍，防刷屏）
+- **已回复判定按消息身份，不按内容**（2026-08-19 修复）：旧版 `replied_to` 用
+  `md5(会话名|消息文本)` 内容指纹——同会话 40 条窗口内发过一模一样的台词（如
+  「沙沙出来」）会被误判"已回复"直接跳过；图片/文件的占位文本同理（每 40 条
+  只能回一张图）。现 `read_chat_db` 每条消息带 `id`（DB `sort_seq`，缺则
+  `local_id`/`create_time`），`replied_to`/`mark_replied` 改用 `_msg_key`（消息
+  身份键），变化检测指纹也并入 id（同秒同文可区分）。回归测试
+  `tests/test_state.py`。

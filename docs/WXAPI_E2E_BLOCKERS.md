@@ -62,7 +62,7 @@
 ```bat
 cd E:\vibe_coding_project\ALYOSHKA\bot-auto-reply
 .venv/Scripts/python.exe -X utf8 wxapi.py --serve      :: 起服务（自动停靠+标定）
-.venv/Scripts/python.exe -X utf8 wxapi_test.py          :: 全量验收 13 项
+.venv/Scripts/python.exe -X utf8 tests/wxapi_test.py          :: 全量验收 13 项
 ```
 
 窗口又"空白/点不动"时：点任务栏"^" → 点微信图标（隐藏）→ 再点一次（唤出）。

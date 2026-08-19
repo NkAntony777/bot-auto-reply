@@ -1,20 +1,33 @@
 @echo off
-rem ä¸€é”®æ¿€æ´» Amyuni è™šæ‹Ÿæ˜¾ç¤ºå™¨ï¼ˆéœ€è¦ç®¡ç†å‘˜æƒé™ï¼‰
-rem ç”¨é€”ï¼šé‡å¯/æ‰çº¿åè™šæ‹Ÿå±æ¶ˆå¤±æ—¶ï¼Œå³é”®"ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œ"æœ¬è„šæœ¬
-rem é¦–æ¬¡å®‰è£…ï¼šcd åˆ° %TEMP%\usbmmidd\usbmmidd_v2 åæ‰§è¡Œ
-rem   deviceinstaller64 install usbmmidd.inf usbmmidd
-rem   deviceinstaller64 enableidd 1
-cd /d "%TEMP%\usbmmidd\usbmmidd_v2" 2>nul || (
-  echo [!] é©±åŠ¨ç›®å½•ä¸å­˜åœ¨ï¼Œè¯·å…ˆè§£å‹ usbmmidd_v2.zip åˆ° %%TEMP%%\usbmmidd
-  pause & exit /b 1
-)
-echo æ­£åœ¨æ¿€æ´»è™šæ‹Ÿæ˜¾ç¤ºå™¨...
+rem ¹ÒÔØ/Ğ¶ÔØ Amyuni ĞéÄâÏÔÊ¾Æ÷£¨enableidd ²»ĞèÒª¹ÜÀíÔ±È¨ÏŞ£©
+rem ÓÃÍ¾£ºÖØÆô/µôÏßºóĞéÄâÆÁÏûÊ§Ê±£¬Ë«»÷±¾½Å±¾ÖØĞÂ¹ÒÔØ
+rem ½öÊ×´Î°²×°Çı¶¯ĞèÒª¹ÜÀíÔ±£ºÓÒ¼ü"ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ"±¾½Å±¾£¬
+rem ½Å±¾»á×Ô¶¯Ö´ĞĞ install + enableidd£¨Ö®ºóÈÕ³£¹ÒÔØ²»ÔÙĞèÒª¹ÜÀíÔ±£©
+rem Ğ¶ÔØĞéÄâÆÁ£ºdeviceinstaller64 enableidd 0
+rem ²ÎÊı£º--nopause ±íÊ¾²»µÈ´ı°´¼ü£¨¹© start_wxbot.bat µ÷ÓÃ£©
+set "NOPAUSE="
+if /i "%~1"=="--nopause" set "NOPAUSE=1"
+cd /d "%TEMP%\usbmmidd\usbmmidd_v2" 2>nul
+if not errorlevel 1 goto :found
+cd /d "E:\tmp_usbmmidd\usbmmidd_v2" 2>nul
+if not errorlevel 1 goto :found
+echo [!] ÕÒ²»µ½ usbmmidd Çı¶¯Ä¿Â¼£¨%%TEMP%%\usbmmidd\usbmmidd_v2 Óë E:\tmp_usbmmidd\usbmmidd_v2 ¾ù²»´æÔÚ£©
+if not defined NOPAUSE pause
+exit /b 1
+:found
+echo ÕıÔÚ¹ÒÔØĞéÄâÏÔÊ¾Æ÷...
+deviceinstaller64 enableidd 1
+if not errorlevel 1 goto :done
+echo [!] enableidd Ê§°Ü£¬³¢ÊÔ°²×°Çı¶¯£¨ĞèÒª±¾½Å±¾ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ£©...
+deviceinstaller64 install usbmmidd.inf usbmmidd
 deviceinstaller64 enableidd 1
 if errorlevel 1 (
-  deviceinstaller64 install usbmmidd.inf usbmmidd
-  deviceinstaller64 enableidd 1
+  echo [!] ÈÔÊ§°Ü£ºÇëÓÒ¼ü"ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ"±¾½Å±¾ÖØÊÔÒ»´Î£¨½öÊ×´ÎĞèÒª£©¡£
+  if not defined NOPAUSE pause
+  exit /b 1
 )
+:done
 echo.
-echo å®Œæˆã€‚å½“å‰ç›‘è§†å™¨æ•°ï¼š
+echo Íê³É¡£µ±Ç°¼àÊÓÆ÷Êı£º
 powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens.Length"
-pause
+if not defined NOPAUSE pause

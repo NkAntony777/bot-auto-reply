@@ -2,11 +2,11 @@
 """run_fixtures - agent 回归重放（docs/RESEARCH_AGENT_FRAMEWORK.md 阶段 A.5）
 
 用法：
-  python run_fixtures.py --kind route          # 路由回归：秒级、零 LLM 成本
-  python run_fixtures.py --engine builtin      # full 用例走 builtin 引擎（真实 LLM+工具）
-  python run_fixtures.py --engine pydantic     # full 用例走 pydantic 引擎
-  python run_fixtures.py --engine both         # 双引擎对比
-结果落 _fixtures/results/<时间戳>.json；route 用例断言快/慢与 expect 一致，全过退出码 0。
+  python tests/run_fixtures.py --kind route          # 路由回归：秒级、零 LLM 成本
+  python tests/run_fixtures.py --engine builtin      # full 用例走 builtin 引擎（真实 LLM+工具）
+  python tests/run_fixtures.py --engine pydantic     # full 用例走 pydantic 引擎
+  python tests/run_fixtures.py --engine both         # 双引擎对比
+结果落 tests/fixtures/results/<时间戳>.json；route 用例断言快/慢与 expect 一致，全过退出码 0。
 full 用例不做文本断言（LLM 非确定性），只记录输出+工具调用，供人工 diff。
 """
 import io
@@ -17,10 +17,10 @@ import time
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace",
                               line_buffering=True)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-BASE = os.path.dirname(os.path.abspath(__file__))
-FIX_DIR = os.path.join(BASE, "_fixtures")
+HERE = os.path.dirname(os.path.abspath(__file__))            # tests/
+BASE = os.path.dirname(HERE)                                 # 项目根
+sys.path.insert(0, BASE)
+FIX_DIR = os.path.join(HERE, "fixtures")
 
 
 def load_fixtures():
